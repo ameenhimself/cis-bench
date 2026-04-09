@@ -9,13 +9,14 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRe
 logger = logging.getLogger(__name__)
 
 
-def download_with_progress(scraper, url, prefix=""):
+def download_with_progress(scraper, url, prefix="", workers=1):
     """Download benchmark with Rich progress bar.
 
     Args:
         scraper: WorkbenchScraper instance
         url: Benchmark URL to download
         prefix: Optional prefix for messages (e.g., "[1/3]")
+        workers: Number of recommendation fetch workers to use per benchmark
 
     Returns:
         Benchmark object
@@ -63,7 +64,9 @@ def download_with_progress(scraper, url, prefix=""):
 
     # Download with progress callback
     logger.debug(f"Starting download: {url}")
-    benchmark = scraper.download_benchmark(url, progress_callback=progress_callback)
+    benchmark = scraper.download_benchmark(
+        url, progress_callback=progress_callback, max_workers=workers
+    )
 
     # Stop progress bar if created
     if progress_bar:

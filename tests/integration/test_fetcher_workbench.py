@@ -682,6 +682,47 @@ class TestWorkbenchScraperFullDownload:
         assert benchmark.total_recommendations == 3
 
     @patch("cis_bench.fetcher.workbench.StrategyDetector.detect_strategy")
+    @patch.object(WorkbenchScraper, "_clone_session")
+    def test_download_benchmark_parallel_workers_preserve_order(
+        self,
+        mock_clone_session,
+        mock_detector,
+        mock_session,
+        mock_strategy,
+        sample_benchmark_title_html,
+        sample_benchmark_navtree,
+        sample_recommendation_html,
+    ):
+        """Parallel recommendation downloads should keep navtree ordering."""
+        mock_detector.return_value = mock_strategy
+        mock_clone_session.return_value = mock_session
+
+        def mock_get(url, **kwargs):
+            response = Mock()
+            response.raise_for_status = Mock()
+
+            if "navtree" in url:
+                response.json.return_value = sample_benchmark_navtree
+            elif "/benchmarks/" in url:
+                response.text = sample_benchmark_title_html
+            else:
+                response.text = sample_recommendation_html
+
+            return response
+
+        mock_session.get.side_effect = mock_get
+
+        scraper = WorkbenchScraper(mock_session)
+
+        benchmark = scraper.download_benchmark(
+            "https://workbench.cisecurity.org/benchmarks/18528", max_workers=4
+        )
+
+        assert [rec.ref for rec in benchmark.recommendations] == ["3.1.1", "3.1.2", "3.2.1"]
+        assert benchmark.total_recommendations == 3
+        assert mock_clone_session.call_count == 2
+
+    @patch("cis_bench.fetcher.workbench.StrategyDetector.detect_strategy")
     def test_download_benchmark_with_progress_callback(
         self,
         mock_detector,

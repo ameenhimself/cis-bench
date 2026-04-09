@@ -12,6 +12,59 @@ class WorkbenchParser:
     """Utilities for parsing CIS WorkBench HTML into structured data."""
 
     @staticmethod
+    def parse_json_parse_attribute(value: str | None):
+        """Parse Vue-style JSON.parse('...') attribute values."""
+        if not value:
+            return None
+
+        prefix = "JSON.parse("
+        if not value.startswith(prefix) or not value.endswith(")"):
+            return None
+
+        inner = value[len(prefix):-1].strip()
+        if len(inner) < 2 or inner[0] not in {'"', "'"} or inner[-1] != inner[0]:
+            return None
+
+        inner = inner[1:-1]
+        try:
+            decoded = inner.encode("utf-8").decode("unicode_escape")
+            return json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            try:
+                return json.loads(inner)
+            except json.JSONDecodeError:
+                return None
+
+    @staticmethod
+    def parse_profile_text(profile_text: str | None) -> list[str]:
+        """Parse profile names from plain text."""
+        if not profile_text:
+            return []
+        text = profile_text.strip()
+        return [text] if text else []
+
+    @staticmethod
+    def parse_mitre_json(mapping_data) -> MITREMapping | None:
+        """Parse MITRE mapping from JSON object."""
+        if not isinstance(mapping_data, dict):
+            return None
+
+        techniques = mapping_data.get("Technique") or mapping_data.get("Techniques") or []
+        tactics = mapping_data.get("Tactic") or mapping_data.get("Tactics") or []
+        mitigations = mapping_data.get("Mitigation") or mapping_data.get("Mitigations") or []
+
+        result = {
+            "techniques": list(techniques),
+            "tactics": list(tactics),
+            "mitigations": list(mitigations),
+        }
+
+        if not any(result.values()):
+            return None
+
+        return MITREMapping(**result)
+
+    @staticmethod
     def parse_mitre_table(html: str | None) -> MITREMapping | None:
         """Parse MITRE ATT&CK mapping from HTML table.
 

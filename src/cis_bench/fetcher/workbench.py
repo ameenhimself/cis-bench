@@ -7,6 +7,7 @@ It produces validated Pydantic Benchmark models.
 import logging
 import re
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any
 
@@ -59,6 +60,45 @@ class WorkbenchScraper:
             self._detected_strategy = StrategyDetector.detect_strategy(html)
 
         return self._detected_strategy
+
+    @staticmethod
+    def _clone_session(session: requests.Session) -> requests.Session:
+        """Clone a session for safe concurrent GET requests."""
+        clone = requests.Session()
+        clone.headers.update(session.headers)
+        clone.cookies.update(session.cookies)
+        clone.verify = session.verify
+        clone.auth = session.auth
+        clone.proxies = dict(session.proxies)
+        clone.cert = session.cert
+        clone.params = dict(session.params)
+        clone.hooks = {key: list(value) for key, value in session.hooks.items()}
+        clone.trust_env = session.trust_env
+        return clone
+
+    @staticmethod
+    def _build_recommendation(rec_meta: dict[str, str], rec_data: dict[str, Any]) -> Recommendation:
+        """Build a validated Recommendation model from navtree metadata and scraped fields."""
+        return Recommendation(
+            ref=rec_meta["ref"],
+            title=rec_meta["title"],
+            url=rec_meta["url"],
+            **rec_data,
+        )
+
+    def _fetch_recommendation_with_session(
+        self,
+        rec_meta: dict[str, str],
+        session: requests.Session,
+        strategy: ScraperStrategy | None = None,
+    ) -> Recommendation:
+        """Fetch and parse a single recommendation using the provided session."""
+        response = session.get(rec_meta["url"])
+        response.raise_for_status()
+        html = response.text
+        active_strategy = strategy or self._get_strategy(html)
+        rec_data = active_strategy.extract_recommendation(html)
+        return self._build_recommendation(rec_meta, rec_data)
 
     def fetch_html(self, url: str) -> str:
         """Fetch HTML from URL.
@@ -157,11 +197,9 @@ class WorkbenchScraper:
 
         def parse_subsections(subsections: list[dict], result: list[dict]):
             for section in subsections:
-                # Process recommendations at this level
                 recommendations = section.get("recommendations_for_nav_tree", [])
                 result.extend(generate_urls(recommendations))
 
-                # Recursively process subsections
                 sub_subsections = section.get("subsections_for_nav_tree")
                 if sub_subsections:
                     parse_subsections(sub_subsections, result)
@@ -185,13 +223,17 @@ class WorkbenchScraper:
         return strategy.extract_recommendation(html)
 
     def download_benchmark(
-        self, benchmark_url: str, progress_callback: Callable[[str], None] | None = None
+        self,
+        benchmark_url: str,
+        progress_callback: Callable[[str], None] | None = None,
+        max_workers: int = 1,
     ) -> Benchmark:
         """Download complete benchmark with all recommendations.
 
         Args:
             benchmark_url: URL to benchmark page
             progress_callback: Optional callback for progress messages
+            max_workers: Number of recommendation fetch workers to use per benchmark
 
         Returns:
             Validated Benchmark (Pydantic model)
@@ -202,61 +244,87 @@ class WorkbenchScraper:
         """
 
         def log(msg: str, level="info"):
-            # Send to progress callback (for progress bar)
             if progress_callback:
                 progress_callback(msg)
 
-            # Only log important messages (not individual fetches)
-            if not msg.startswith("["):  # Skip "[1/322] Fetching..." messages
+            if not msg.startswith("["):
                 if level == "debug":
                     logger.debug(msg)
                 else:
                     logger.info(msg)
 
-        # Extract benchmark ID
         benchmark_id = self.get_benchmark_id(benchmark_url)
         log(f"Fetching benchmark: {benchmark_url}", level="debug")
 
-        # Get benchmark title
         title = self.get_benchmark_title(benchmark_url)
         log(f"Benchmark title: {title}", level="debug")
 
-        # Extract version from title (simple heuristic)
         version_match = re.search(r"v[\d.]+|vNEXT", title, re.IGNORECASE)
         version = version_match.group() if version_match else "v1.0.0"
 
-        # Fetch navigation tree
         navtree = self.fetch_navtree(benchmark_id)
         recommendations_list = self.parse_navtree(navtree)
-        log(f"Found {len(recommendations_list)} recommendations", level="debug")
+        total = len(recommendations_list)
+        log(f"Found {total} recommendations", level="debug")
 
-        # Fetch each recommendation
-        recommendations = []
-        for idx, rec_meta in enumerate(recommendations_list, 1):
-            log(
-                f"[{idx}/{len(recommendations_list)}] Fetching {rec_meta['ref']}: {rec_meta['title']}",
-                level="debug",
-            )
+        recommendations: list[Recommendation | None] = [None] * total
+        completed = 0
 
+        if recommendations_list:
+            first_meta = recommendations_list[0]
             try:
-                rec_data = self.fetch_recommendation(rec_meta["url"])
-
-                # Create Recommendation (Pydantic validates automatically)
-                recommendation = Recommendation(
-                    ref=rec_meta["ref"],
-                    title=rec_meta["title"],
-                    url=rec_meta["url"],
-                    **rec_data,  # Spread extracted fields
+                first_data = self.fetch_recommendation(first_meta["url"])
+                recommendations[0] = self._build_recommendation(first_meta, first_data)
+                completed = 1
+                log(
+                    f"[{completed}/{total}] Fetched {first_meta['ref']}: {first_meta['title']}",
+                    level="debug",
                 )
-
-                recommendations.append(recommendation)
-
             except Exception as e:
-                logger.error(f"Failed to fetch {rec_meta['url']}: {e}")
-                # Continue with other recommendations
-                continue
+                logger.error(f"Failed to fetch {first_meta['url']}: {e}")
 
-        # Create Benchmark (Pydantic validates automatically)
+        remaining = list(enumerate(recommendations_list[1:], start=1))
+        workers = max(1, max_workers)
+
+        if remaining and workers > 1 and self._detected_strategy is not None:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                future_to_index = {
+                    executor.submit(
+                        self._fetch_recommendation_with_session,
+                        rec_meta,
+                        self._clone_session(self.session),
+                        self._detected_strategy,
+                    ): (idx, rec_meta)
+                    for idx, rec_meta in remaining
+                }
+
+                for future in as_completed(future_to_index):
+                    idx, rec_meta = future_to_index[future]
+                    try:
+                        recommendations[idx] = future.result()
+                        completed += 1
+                        log(
+                            f"[{completed}/{total}] Fetched {rec_meta['ref']}: {rec_meta['title']}",
+                            level="debug",
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to fetch {rec_meta['url']}: {e}")
+        else:
+            for idx, rec_meta in remaining:
+                try:
+                    rec_data = self.fetch_recommendation(rec_meta["url"])
+                    recommendations[idx] = self._build_recommendation(rec_meta, rec_data)
+                    completed += 1
+                    log(
+                        f"[{completed}/{total}] Fetched {rec_meta['ref']}: {rec_meta['title']}",
+                        level="debug",
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to fetch {rec_meta['url']}: {e}")
+                    continue
+
+        final_recommendations = [rec for rec in recommendations if rec is not None]
+
         benchmark = Benchmark(
             title=title,
             benchmark_id=benchmark_id,
@@ -265,11 +333,11 @@ class WorkbenchScraper:
             scraper_version=(
                 self._detected_strategy.version if self._detected_strategy else "manual"
             ),
-            total_recommendations=len(recommendations),
-            recommendations=recommendations,
+            total_recommendations=len(final_recommendations),
+            recommendations=final_recommendations,
             downloaded_at=datetime.now(),
         )
 
-        log(f"✓ Successfully downloaded {len(recommendations)} recommendations", level="debug")
+        log(f"Successfully downloaded {len(final_recommendations)} recommendations", level="debug")
 
         return benchmark

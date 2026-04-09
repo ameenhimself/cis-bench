@@ -81,6 +81,14 @@ class TestDownloadCommandStructure:
         assert "force" in param_names
 
 
+    def test_download_has_latest_option(self):
+        """download should have --latest flag for latest-version filtering."""
+        from cis_bench.cli.commands.download import download
+
+        param_names = [p.name for p in download.params]
+        assert "latest" in param_names
+
+
 class TestGetCommandStructure:
     """Verify get command does NOT have auth flags (DRY principle)."""
 

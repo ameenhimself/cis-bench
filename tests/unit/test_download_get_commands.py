@@ -252,6 +252,108 @@ class TestDownloadFileInput:
                         assert "12345" in call_args[0][0]
 
 
+    def test_download_workers_flag_passed_to_helper(self, runner, sample_benchmark):
+        """Download forwards the worker count to download helper."""
+        with runner.isolated_filesystem():
+            with patch(
+                "cis_bench.cli.commands.download.AuthManager.get_or_create_session"
+            ) as mock_auth:
+                mock_session = Mock()
+                mock_auth.return_value = mock_session
+
+                with patch(
+                    "cis_bench.cli.commands.download.WorkbenchScraper"
+                ) as mock_scraper_class:
+                    mock_scraper = Mock()
+                    mock_scraper_class.return_value = mock_scraper
+
+                    with patch(
+                        "cis_bench.cli.helpers.download_helper.download_with_progress"
+                    ) as mock_download:
+                        mock_download.return_value = sample_benchmark
+
+                        with patch("cis_bench.cli.commands.download.Config") as mock_config:
+                            mock_config.get_catalog_db_path.return_value = Path(
+                                "/nonexistent/catalog.db"
+                            )
+
+                            result = runner.invoke(cli, ["download", "12345", "--workers", "4"])
+
+                            assert result.exit_code == 0
+                            mock_download.assert_called_once_with(
+                                mock_scraper,
+                                "https://workbench.cisecurity.org/benchmarks/12345",
+                                prefix="[1/1]",
+                                workers=4,
+                            )
+
+
+    def test_download_latest_filters_non_latest_inputs(self, runner, sample_benchmark, tmp_path):
+        """Download --latest should skip non-latest benchmark IDs before downloading."""
+        catalog_path = tmp_path / "catalog.db"
+        catalog_path.touch()
+
+        with runner.isolated_filesystem():
+            with patch(
+                "cis_bench.cli.commands.download.AuthManager.get_or_create_session"
+            ) as mock_auth:
+                mock_session = Mock()
+                mock_auth.return_value = mock_session
+
+                with patch(
+                    "cis_bench.cli.commands.download.WorkbenchScraper"
+                ) as mock_scraper_class:
+                    mock_scraper = Mock()
+                    mock_scraper_class.return_value = mock_scraper
+
+                    with patch(
+                        "cis_bench.cli.helpers.download_helper.download_with_progress"
+                    ) as mock_download:
+                        mock_download.return_value = sample_benchmark
+
+                        with patch("cis_bench.cli.commands.download.Config") as mock_config:
+                            mock_config.get_catalog_db_path.return_value = catalog_path
+
+                            with patch("cis_bench.catalog.database.CatalogDatabase") as mock_db_class:
+                                mock_db = Mock()
+                                mock_db_class.return_value = mock_db
+                                mock_db.get_benchmark.side_effect = [
+                                    {"benchmark_id": "12345", "is_latest": False},
+                                    {"benchmark_id": "67890", "is_latest": True},
+                                ]
+                                mock_db.get_downloaded.return_value = None
+
+                                result = runner.invoke(
+                                    cli, ["download", "12345", "67890", "--latest"]
+                                )
+
+                                assert result.exit_code == 0
+                                assert "Filtered out 1 non-latest benchmark version" in result.output
+                                mock_download.assert_called_once_with(
+                                    mock_scraper,
+                                    "https://workbench.cisecurity.org/benchmarks/67890",
+                                    prefix="[1/1]",
+                                    workers=1,
+                                )
+
+    def test_download_latest_requires_catalog_database(self, runner):
+        """Download --latest should fail cleanly when catalog metadata is unavailable."""
+        with patch(
+            "cis_bench.cli.commands.download.AuthManager.get_or_create_session"
+        ) as mock_auth:
+            mock_session = Mock()
+            mock_auth.return_value = mock_session
+
+            with patch("cis_bench.cli.commands.download.Config") as mock_config:
+                mock_config.get_catalog_db_path.return_value = Path("/nonexistent/catalog.db")
+
+                result = runner.invoke(cli, ["download", "12345", "--latest"])
+
+                assert result.exit_code == 1
+                assert "--latest requires a catalog database" in result.output
+                assert "catalog refresh" in result.output
+
+
 class TestDownloadMissingArgs:
     """Test download command with missing arguments (lines 129-134)."""
 

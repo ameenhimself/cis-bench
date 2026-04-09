@@ -74,6 +74,18 @@ class TestDownloadWithProgress:
         assert "progress_callback" in call_kwargs
         assert callable(call_kwargs["progress_callback"])
 
+    def test_download_with_progress_passes_workers(self, sample_benchmark):
+        """download_with_progress should forward worker count to scraper."""
+        from cis_bench.cli.helpers.download_helper import download_with_progress
+
+        mock_scraper = MagicMock()
+        mock_scraper.download_benchmark.return_value = sample_benchmark
+
+        download_with_progress(mock_scraper, "https://example.com/benchmarks/12345", workers=4)
+
+        call_kwargs = mock_scraper.download_benchmark.call_args.kwargs
+        assert call_kwargs["max_workers"] == 4
+
     def test_download_with_progress_prefix(self, sample_benchmark):
         """download_with_progress should use prefix in output."""
         from cis_bench.cli.helpers.download_helper import download_with_progress
@@ -99,7 +111,7 @@ class TestDownloadWithProgress:
         mock_scraper = MagicMock()
 
         # Capture the callback
-        def capture_callback(url, progress_callback=None):
+        def capture_callback(url, progress_callback=None, max_workers=1):
             if progress_callback:
                 progress_callback("Benchmark title: CIS Test Benchmark")
             return sample_benchmark
@@ -130,7 +142,7 @@ class TestDownloadWithProgress:
         mock_scraper = MagicMock()
 
         # Capture the callback and simulate finding recommendations
-        def capture_callback(url, progress_callback=None):
+        def capture_callback(url, progress_callback=None, max_workers=1):
             if progress_callback:
                 progress_callback("Found 50 recommendations to download")
             return sample_benchmark
@@ -162,7 +174,7 @@ class TestDownloadWithProgress:
         mock_scraper = MagicMock()
 
         # Capture the callback and simulate progress updates
-        def capture_callback(url, progress_callback=None):
+        def capture_callback(url, progress_callback=None, max_workers=1):
             if progress_callback:
                 progress_callback("Found 3 recommendations to download")
                 progress_callback("[1/3] Downloading recommendation 1")
@@ -188,7 +200,7 @@ class TestDownloadWithProgress:
         mock_scraper = MagicMock()
 
         # Capture the callback and send unknown messages
-        def capture_callback(url, progress_callback=None):
+        def capture_callback(url, progress_callback=None, max_workers=1):
             if progress_callback:
                 progress_callback("Some random debug message")
                 progress_callback("Another unrelated message")
@@ -234,7 +246,7 @@ class TestDownloadWithProgress:
 
         mock_scraper = MagicMock()
 
-        def capture_callback(url, progress_callback=None):
+        def capture_callback(url, progress_callback=None, max_workers=1):
             if progress_callback:
                 progress_callback("Found 10 recommendations to download")
             return sample_benchmark
@@ -256,7 +268,7 @@ class TestDownloadWithProgress:
 
         mock_scraper = MagicMock()
 
-        def capture_callback(url, progress_callback=None):
+        def capture_callback(url, progress_callback=None, max_workers=1):
             if progress_callback:
                 # Title with extra spaces
                 progress_callback("Benchmark title:   CIS Ubuntu 22.04 Benchmark   ")

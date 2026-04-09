@@ -150,6 +150,28 @@ def v1_malformed_html():
 
 
 @pytest.fixture
+def v1_component_html():
+    """Current WorkBench component-style HTML."""
+    return """
+    <!DOCTYPE html>
+    <html>
+    <body>
+        <wb-recommendation-data attribute="description" text="Component description"></wb-recommendation-data>
+        <wb-recommendation-data attribute="rationale_statement" text="Component rationale"></wb-recommendation-data>
+        <wb-recommendation-data attribute="audit_procedure" text="Component audit"></wb-recommendation-data>
+        <wb-recommendation-data attribute="remediation_procedure" text="Component remediation"></wb-recommendation-data>
+        <wb-recommendation-data attribute="references" text="NIST SP 800-53 Rev. 5: AU-8"></wb-recommendation-data>
+        <wb-recommendation-data attribute="notes" text="Component notes"></wb-recommendation-data>
+        <wb-recommendation-data attribute="automated_scoring" text="Manual"></wb-recommendation-data>
+        <wb-recommendation-data attribute="profiles" text="Level 1 - Server"></wb-recommendation-data>
+        <wb-recommendation-feature-controls :controls='JSON.parse("[{\"version\":8,\"control\":\"4.1\",\"title\":\"Secure Configuration Process\",\"ig1\":true,\"ig2\":true,\"ig3\":true}]")'></wb-recommendation-feature-controls>
+        <wb-recommendation-mitre-mappings :mappings='JSON.parse("{\"Technique\":[\"T1070\"],\"Tactics\":[\"TA0040\"],\"Mitigations\":[\"M1022\"]}")'></wb-recommendation-mitre-mappings>
+        <wb-recommendation-artifacts artifacts-json='[{"id": 1, "view_level": "1.1", "title": "Artifact", "status": "automated", "artifact_type": {"name": "bash"}}]'></wb-recommendation-artifacts>
+    </body>
+    </html>
+    """
+
+@pytest.fixture
 def future_v2_html():
     """Hypothetical future HTML structure (V2) with different selectors."""
     return """
@@ -575,6 +597,24 @@ class TestWorkbenchV1StrategyMissingFields:
         # Should return empty list on JSON parse error
         assert data["cis_controls"] == []
 
+    def test_extract_component_style_html(self, v1_component_html):
+        """Test extraction from current wb-recommendation-data component layout."""
+        strategy = WorkbenchV1Strategy()
+        data = strategy.extract_recommendation(v1_component_html)
+
+        assert data["description"] == "Component description"
+        assert data["rationale"] == "Component rationale"
+        assert data["audit"] == "Component audit"
+        assert data["remediation"] == "Component remediation"
+        assert data["assessment_status"] == "Manual"
+        assert data["profiles"] == ["Level 1 - Server"]
+        assert len(data["cis_controls"]) == 1
+        assert data["cis_controls"][0].control == "4.1"
+        assert data["mitre_mapping"] is not None
+        assert "T1070" in data["mitre_mapping"].techniques
+        assert data["nist_controls"] == ["AU-8"]
+        assert len(data["artifacts"]) == 1
+
     def test_extract_malformed_html(self, v1_malformed_html):
         """Test extraction with malformed HTML (BeautifulSoup should handle gracefully)."""
         strategy = WorkbenchV1Strategy()
@@ -613,6 +653,11 @@ class TestWorkbenchV1StrategyCompatibility:
 
         strategy = WorkbenchV1Strategy()
         assert strategy.is_compatible(html) is True
+
+    def test_is_compatible_with_component_style_html(self, v1_component_html):
+        """Test V1 strategy detects new component-based HTML as compatible."""
+        strategy = WorkbenchV1Strategy()
+        assert strategy.is_compatible(v1_component_html) is True
 
     def test_is_not_compatible_with_future_html(self, future_v2_html):
         """Test V1 strategy rejects future V2 HTML structure."""

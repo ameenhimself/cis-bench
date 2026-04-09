@@ -42,6 +42,14 @@ logger = logging.getLogger(__name__)
 @click.option("--debug", "-d", is_flag=True, help="Enable debug logging (same as --verbose)")
 @click.option("--quiet", "-q", is_flag=True, help="Quiet mode (warnings and errors only)")
 @click.option("--force", is_flag=True, help="Force re-download even if already cached in database")
+@click.option("--latest", is_flag=True, help="Only download latest benchmark versions from catalog")
+@click.option(
+    "--workers",
+    type=click.IntRange(1, 32),
+    default=1,
+    show_default=True,
+    help="Number of recommendation fetch workers to use per benchmark",
+)
 def download(
     benchmark_ids,
     urls_file,
@@ -51,6 +59,8 @@ def download(
     debug,
     quiet,
     force,
+    latest,
+    workers,
 ):
     """Download CIS benchmarks by ID or URL.
 
@@ -72,7 +82,9 @@ def download(
 
         LoggingConfig.setup_from_flags(quiet=quiet, verbose=(verbose or debug))
 
-    logger.debug(f"Starting download command: output_dir={output_dir}, formats={export_formats}")
+    logger.debug(
+        f"Starting download command: output_dir={output_dir}, formats={export_formats}, latest={latest}, workers={workers}"
+    )
 
     # Get authenticated session (uses saved session only)
     try:
@@ -133,6 +145,59 @@ def download(
         console.print("[red]Error: No benchmarks to download[/red]")
         sys.exit(1)
 
+    if latest:
+        catalog_db_path = Config.get_catalog_db_path()
+        if not catalog_db_path.exists():
+            console.print("[red]Error: --latest requires a catalog database.[/red]")
+            console.print("[cyan]Run 'cis-bench catalog refresh' first.[/cyan]")
+            sys.exit(1)
+
+        try:
+            from cis_bench.catalog.database import CatalogDatabase
+
+            db = CatalogDatabase(catalog_db_path)
+            filtered_urls = []
+            skipped_count = 0
+            missing_ids = []
+            seen_urls = set()
+
+            for url in urls:
+                benchmark_id = url.split("/")[-1]
+                benchmark = db.get_benchmark(benchmark_id)
+
+                if not benchmark:
+                    missing_ids.append(benchmark_id)
+                    continue
+
+                if not benchmark.get("is_latest"):
+                    skipped_count += 1
+                    continue
+
+                if url not in seen_urls:
+                    filtered_urls.append(url)
+                    seen_urls.add(url)
+
+            if missing_ids:
+                console.print(
+                    f"[yellow]Warning:[/yellow] Skipped {len(missing_ids)} benchmark(s) not found in catalog metadata"
+                )
+
+            if skipped_count:
+                console.print(
+                    f"[cyan]Filtered out {skipped_count} non-latest benchmark version(s).[/cyan]"
+                )
+
+            urls = filtered_urls
+
+        except Exception as e:
+            logger.error(f"Latest-version filtering failed: {e}", exc_info=True)
+            console.print(f"[red]Error applying --latest filter:[/red] {e}")
+            sys.exit(1)
+
+        if not urls:
+            console.print("[red]Error: No latest-version benchmarks matched the input.[/red]")
+            sys.exit(1)
+
     # Download benchmarks
     logger.debug(f"Starting download of {len(urls)} benchmark(s)")
     console.print(f"[bold]Downloading {len(urls)} benchmark(s)...[/bold]\n")
@@ -173,7 +238,7 @@ def download(
 
             console.print(f"{prefix} [cyan]Starting download...[/cyan]")
 
-            benchmark = download_with_progress(scraper, url, prefix=prefix)
+            benchmark = download_with_progress(scraper, url, prefix=prefix, workers=workers)
 
             logger.debug(f"Successfully downloaded benchmark: {benchmark.title}")
             console.print(f"{prefix} [green]✓[/green] Downloaded: [bold]{benchmark.title}[/bold]")
