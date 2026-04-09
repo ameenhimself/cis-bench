@@ -44,7 +44,7 @@ def auth():
     "--cookies",
     "-c",
     type=click.Path(exists=True),
-    help="Load cookies from file instead of browser (Netscape format)",
+    help="Load cookies from file instead of browser (Netscape cookies.txt or JSON export)",
 )
 @click.option(
     "--open",
@@ -73,6 +73,7 @@ def login(browser, cookies, open, no_verify_ssl):
         cis-bench auth login --browser chrome --open
         cis-bench auth login --browser firefox
         cis-bench auth login --cookies cookies.txt
+        cis-bench auth login --cookies cookies.json
 
     \b
     Windows users: If you get permission errors with Chrome/Edge,

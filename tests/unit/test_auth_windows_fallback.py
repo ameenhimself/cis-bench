@@ -102,6 +102,24 @@ class TestWindowsCookieFallback:
         assert session is not None
 
     @patch("cis_bench.fetcher.auth.browser_cookie3")
+    def test_load_cookies_preserves_root_cause_when_fallback_fails(
+        self, mock_bc3, mock_windows_platform
+    ):
+        """Should preserve the Chromium permission error if Firefox fallback also fails."""
+        from cis_bench.fetcher.auth import AuthManager
+
+        mock_bc3.edge.side_effect = Exception("This operation requires admin. Please run as admin.")
+        mock_bc3.firefox.side_effect = Exception("Could not find Firefox profile directory")
+
+        with pytest.raises(Exception) as exc_info:
+            AuthManager.load_cookies_from_browser("edge", try_fallback=True)
+
+        message = str(exc_info.value)
+        assert "Failed to extract cookies from edge" in message
+        assert "requires admin" in message.lower()
+        assert "fallback to firefox also failed" in message.lower()
+
+    @patch("cis_bench.fetcher.auth.browser_cookie3")
     def test_load_cookies_no_fallback_on_linux(self, mock_bc3, mock_linux_platform):
         """Should NOT try fallback on non-Windows platforms."""
         from cis_bench.fetcher.auth import AuthManager

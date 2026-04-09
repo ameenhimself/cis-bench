@@ -4,6 +4,7 @@ Tests AuthManager cookie extraction, session creation, and error handling.
 """
 
 import http.cookiejar
+import json
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -211,6 +212,55 @@ class TestAuthManagerFileBasedCookies:
         # Verify
         assert isinstance(session, requests.Session)
         assert session.cookies == mock_jar_instance
+
+    def test_load_cookies_from_json_array_success(self, tmp_path):
+        """Should load workbench cookies from a JSON array export."""
+        cookie_file = tmp_path / "cookies.json"
+        cookie_file.write_text(
+            json.dumps(
+                [
+                    {
+                        "name": "XSRF-TOKEN",
+                        "value": "abc123",
+                        "domain": "workbench.cisecurity.org",
+                        "path": "/",
+                        "secure": True,
+                        "httpOnly": False,
+                    },
+                    {
+                        "name": "ignore-me",
+                        "value": "nope",
+                        "domain": "example.com",
+                    },
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        session = AuthManager.load_cookies_from_file(str(cookie_file))
+
+        assert isinstance(session, requests.Session)
+        assert session.cookies.get("XSRF-TOKEN") == "abc123"
+        assert session.cookies.get("ignore-me") is None
+
+    def test_load_cookies_from_json_mapping_success(self, tmp_path):
+        """Should load simple JSON name/value mappings as workbench cookies."""
+        cookie_file = tmp_path / "cookies.json"
+        cookie_file.write_text(
+            json.dumps(
+                {
+                    "XSRF-TOKEN": "abc123",
+                    "workbench_session": "xyz789",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        session = AuthManager.load_cookies_from_file(str(cookie_file))
+
+        assert isinstance(session, requests.Session)
+        assert session.cookies.get("XSRF-TOKEN") == "abc123"
+        assert session.cookies.get("workbench_session") == "xyz789"
 
 
 class TestAuthManagerCookieDictionary:

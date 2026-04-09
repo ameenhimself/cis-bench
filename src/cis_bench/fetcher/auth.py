@@ -1,6 +1,7 @@
 """Authentication and cookie management for CIS WorkBench."""
 
 import http.cookiejar
+import json
 import logging
 import platform
 from pathlib import Path
@@ -166,20 +167,119 @@ Workarounds:
                         f"{browser} failed with permission error on Windows, "
                         f"trying {fallback} as fallback"
                     )
-                    # Recursive call with fallback browser (no further fallback)
-                    return AuthManager.load_cookies_from_browser(
-                        fallback, verify_ssl=verify_ssl, try_fallback=False
-                    )
+                    try:
+                        # Recursive call with fallback browser (no further fallback)
+                        return AuthManager.load_cookies_from_browser(
+                            fallback, verify_ssl=verify_ssl, try_fallback=False
+                        )
+                    except Exception as fallback_error:
+                        # Preserve the original Windows permission error so callers can
+                        # still surface the correct root cause and workarounds.
+                        raise Exception(
+                            f"Failed to extract cookies from {browser}: {e}\n"
+                            f"Fallback to {fallback} also failed: {fallback_error}"
+                        ) from fallback_error
 
             # No fallback available or not on Windows - raise with helpful message
             raise Exception(f"Failed to extract cookies from {browser}: {e}") from e
 
     @staticmethod
+    def _load_cookies_from_json_file(cookies_file: str, verify_ssl=None) -> requests.Session:
+        """Load cookies from a JSON export file.
+
+        Supported JSON shapes:
+        - List of cookie objects with name/value/domain fields
+        - Object with a ``cookies`` list
+        - Simple object mapping cookie names to values
+        """
+        session = requests.Session()
+
+        if verify_ssl is None:
+            session.verify = Config.get_verify_ssl()
+        else:
+            session.verify = verify_ssl
+
+        with open(cookies_file, encoding="utf-8") as f:
+            payload = json.load(f)
+
+        if isinstance(payload, list):
+            cookie_records = payload
+        elif isinstance(payload, dict) and isinstance(payload.get("cookies"), list):
+            cookie_records = payload["cookies"]
+        elif isinstance(payload, dict) and all(
+            not isinstance(value, (dict, list)) for value in payload.values()
+        ):
+            cookie_records = [
+                {"name": name, "value": value, "domain": "workbench.cisecurity.org"}
+                for name, value in payload.items()
+            ]
+        else:
+            raise ValueError(
+                "Unsupported JSON cookie format. Use a cookie array, a {'cookies': [...]} "
+                "object, or a simple name/value mapping."
+            )
+
+        loaded_count = 0
+        for record in cookie_records:
+            if not isinstance(record, dict):
+                continue
+
+            name = record.get("name") or record.get("key")
+            if not name:
+                continue
+
+            domain = (
+                record.get("domain")
+                or record.get("host")
+                or record.get("domainName")
+                or "workbench.cisecurity.org"
+            )
+            if not isinstance(domain, str):
+                domain = str(domain)
+
+            if "workbench.cisecurity.org" not in domain.lstrip(".").lower():
+                continue
+
+            expires = record.get("expires")
+            if expires is None:
+                expires = record.get("expirationDate")
+            if expires is None:
+                expires = record.get("expiry")
+            if expires in ("", 0, "0"):
+                expires = None
+            elif expires is not None:
+                try:
+                    expires = int(float(expires))
+                except (TypeError, ValueError):
+                    expires = None
+
+            cookie = requests.cookies.create_cookie(
+                name=str(name),
+                value=str(record.get("value", "")),
+                domain=domain,
+                path=str(record.get("path") or "/"),
+                secure=bool(record.get("secure", False)),
+                expires=expires,
+                rest={"HttpOnly": bool(record.get("httpOnly", record.get("httponly", False)))},
+            )
+            session.cookies.set_cookie(cookie)
+            loaded_count += 1
+
+        if loaded_count == 0:
+            raise ValueError(
+                "No workbench.cisecurity.org cookies found in JSON file. "
+                "Ensure you exported cookies for the CIS WorkBench domain."
+            )
+
+        logger.debug(f"Loaded {loaded_count} cookies from JSON file")
+        return session
+
+    @staticmethod
     def load_cookies_from_file(cookies_file: str, verify_ssl=None) -> requests.Session:
-        """Load cookies from Netscape format cookies.txt file.
+        """Load cookies from Netscape cookies.txt or supported JSON exports.
 
         Args:
-            cookies_file: Path to cookies.txt file
+            cookies_file: Path to cookie file
             verify_ssl: SSL verification setting (None = use Config default)
 
         Returns:
@@ -199,6 +299,13 @@ Workarounds:
 
         try:
             logger.debug(f"Loading cookies from {cookies_file}...")
+
+            cookie_path = Path(cookies_file)
+            if cookie_path.suffix.lower() == ".json":
+                return AuthManager._load_cookies_from_json_file(
+                    cookies_file, verify_ssl=verify_ssl
+                )
+
             cj = http.cookiejar.MozillaCookieJar(cookies_file)
             cj.load(ignore_discard=True, ignore_expires=True)
             session.cookies = cj

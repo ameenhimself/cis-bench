@@ -1,0 +1,41 @@
+[
+    {
+        "domain": "workbench.cisecurity.org",
+        "expirationDate": 1810282883.224857,
+        "hostOnly": true,
+        "httpOnly": true,
+        "name": "remember_web_3dc7a913ef5fd4b890ecabe3487085573e16cf82",
+        "path": "/",
+        "sameSite": "lax",
+        "secure": true,
+        "session": false,
+        "storeId": null,
+        "value": "eyJpdiI6IkJEdVZOOFMrQWVtbkhNUERFUFc1elE9PSIsInZhbHVlIjoidE9EU2N4NVhxVDFySlhYVVRhVWpGYmNBeW1BSUlXTE1WQkJURUE4ZXhkcmtJYkkvUFdWaXJWSjk1ZkRnRW4vUTgzQUJtM2tIaGR4cTYvbFFFK3hQMlVFYTB5a1dlYUF3M2hoSHZSSEZ0WlVmVjNaQmtZbVprRFQ2Yi9nWXdUU2wvWVpPZEllSEd4ZHk0dkU1Q25ocW54dDA2OGNsL0ZOM1hXV2JtdFVJMjFQS09jaklsbnBoaU96SHljVWtIOS9abGtzNXIyQzJUdWZFZUJpaW00SFZqNUluSnUwRURLdExhdW1Yek5EZGVWQT0iLCJtYWMiOiIyZmQxZmRkNmVmNmNiODJkZmYwZmQ1NjFmY2IxZmExMWU4NmE5M2U1YTI2NzFlMzlkMzBhMzlmOWQwN2ExZWE2IiwidGFnIjoiIn0%3D"
+    },
+    {
+        "domain": "workbench.cisecurity.org",
+        "expirationDate": 1775752121.315977,
+        "hostOnly": true,
+        "httpOnly": true,
+        "name": "workbench_session",
+        "path": "/",
+        "sameSite": "lax",
+        "secure": true,
+        "session": false,
+        "storeId": null,
+        "value": "eyJpdiI6IlF4QWdqWGQ0UjdKblRlWGF5TkhkZFE9PSIsInZhbHVlIjoiMWUrenhBUVhFbnVGNU1NdC9OSmZHYndLTjdJaFI4bVU1WnVZYzBMLzhlSFNFMjFFRGZlUTBRUlBGSmFHNWRsNnF5c1VScnhtYUZBMHZpRFJ6MXczem9xWTVkKzJXVWh2RkVGVUVMYTB0dVNzamw0dG1wZER4RWV3a3JHZXFscUMiLCJtYWMiOiIxZDM1NDMwYzA5OTFhNGI0MWI2NzNjN2E1MjczOGQ5ODNhZDMzMDczMDQ1MTYyY2RmYmIwYzU5YjFiOTMxOWQ5IiwidGFnIjoiIn0%3D"
+    },
+    {
+        "domain": "workbench.cisecurity.org",
+        "expirationDate": 1775752121.315698,
+        "hostOnly": true,
+        "httpOnly": true,
+        "name": "XSRF-TOKEN",
+        "path": "/",
+        "sameSite": "lax",
+        "secure": true,
+        "session": false,
+        "storeId": null,
+        "value": "eyJpdiI6InZrRk44a1ZlVHEyRDR1QzR3VmRGc0E9PSIsInZhbHVlIjoieVN0NE5SM0lqN0NEZEdpTUYvSzlMNlFQOEtkbDZKVEFYNW1wU3dEaTd2MFNrclF2M3gvM0pQWlRrMlNGdE5BN0FZVG5jRmNRWklodHFET2kweEM1SWVseVRSRlQ1MDVhZEloQ09PM0lvT0I1MThiS0xNalZRR3lrRzYyUGI3QjUiLCJtYWMiOiJlNWM2YWMxYjUyNmEwNWYxMDk1YzU5YmI3MWVjZmQ2NzQ3OGRkMWFiMTQ3ZWM0ZmU5NTNkMTFjNjdhYWQ5YTkyIiwidGFnIjoiIn0%3D"
+    }
+]
