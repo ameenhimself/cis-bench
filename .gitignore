@@ -133,6 +133,8 @@ navtree.json
 /output/
 /benchmarks/
 /benchmark_*.json
+/all-benchmarks/
+/speed-test/
 
 # Project-specific: Internal documentation (not for repo)
 SESSION*.md
