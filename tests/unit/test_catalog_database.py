@@ -15,7 +15,10 @@ def temp_db():
         db_path = Path(tmpdir) / "test_catalog.db"
         db = CatalogDatabase(db_path)
         db.initialize_schema()
-        yield db
+        try:
+            yield db
+        finally:
+            db.engine.dispose()
 
 
 @pytest.fixture
@@ -346,6 +349,55 @@ class TestLookupTables:
                 temp_db.get_status_id("InvalidStatus", session)
 
 
+class TestLatestVersionSelection:
+    """Test latest-version flag calculation."""
+
+    def test_mark_latest_versions_prefers_highest_numeric_version(self, temp_db):
+        """Highest numeric version should be the only latest benchmark in a family."""
+        for benchmark_id, version in [("810", "v1.0.0"), ("7333", "v2.0.0"), ("15963", "v3.0.0")]:
+            temp_db.insert_benchmark(
+                {
+                    "benchmark_id": benchmark_id,
+                    "title": "CIS Amazon Linux 2 Benchmark",
+                    "version": version,
+                    "url": f"https://workbench.cisecurity.org/benchmarks/{benchmark_id}",
+                    "status": "Published",
+                }
+            )
+
+        temp_db.mark_latest_versions()
+
+        assert temp_db.get_benchmark("810")["is_latest"] is False
+        assert temp_db.get_benchmark("7333")["is_latest"] is False
+        assert temp_db.get_benchmark("15963")["is_latest"] is True
+
+    def test_mark_latest_versions_prefers_vnext(self, temp_db):
+        """vNEXT should outrank numeric releases in the same family."""
+        temp_db.insert_benchmark(
+            {
+                "benchmark_id": "100",
+                "title": "CIS Example Benchmark",
+                "version": "v2.0.0",
+                "url": "https://workbench.cisecurity.org/benchmarks/100",
+                "status": "Published",
+            }
+        )
+        temp_db.insert_benchmark(
+            {
+                "benchmark_id": "101",
+                "title": "CIS Example Benchmark",
+                "version": "vNEXT",
+                "url": "https://workbench.cisecurity.org/benchmarks/101",
+                "status": "Published",
+            }
+        )
+
+        temp_db.mark_latest_versions()
+
+        assert temp_db.get_benchmark("100")["is_latest"] is False
+        assert temp_db.get_benchmark("101")["is_latest"] is True
+
+
 class TestDownloadedBenchmarks:
     """Test downloaded benchmark tracking."""
 
@@ -386,6 +438,17 @@ class TestDownloadedBenchmarks:
         """Test getting non-existent download returns None."""
         downloaded = temp_db.get_downloaded("99999")
         assert downloaded is None
+
+
+    def test_clear_downloaded_removes_all_cached_entries(self, temp_db, sample_benchmark_data):
+        """clear_downloaded should delete all downloaded benchmark cache rows."""
+        temp_db.insert_benchmark(sample_benchmark_data)
+        temp_db.save_downloaded("23598", '{"v": 1}', "hash1", 100)
+
+        cleared = temp_db.clear_downloaded()
+
+        assert cleared == 1
+        assert temp_db.get_downloaded("23598") is None
 
     def test_check_updates_available(self, temp_db, sample_benchmark_data):
         """Test checking for available updates."""

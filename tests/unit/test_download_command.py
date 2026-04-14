@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -97,6 +97,7 @@ class TestDownloadDatabaseCaching:
                         # Mock CatalogDatabase
                         with patch("cis_bench.catalog.database.CatalogDatabase") as mock_db_class:
                             mock_db = Mock()
+                            mock_db.get_downloaded.return_value = None
                             mock_db_class.return_value = mock_db
 
                             result = runner.invoke(
@@ -118,6 +119,7 @@ class TestDownloadDatabaseCaching:
                             # Verify output shows caching message
                             assert "Cached in database" in result.output
                             assert "ID: 23598" in result.output
+                            assert "Time Elapsed:" in result.output
 
     def test_download_works_without_catalog_database(self, runner, sample_benchmark, tmp_path):
         """Download still works when catalog database doesn't exist."""
@@ -181,6 +183,7 @@ class TestDownloadDatabaseCaching:
                         # Mock database to raise error
                         with patch("cis_bench.catalog.database.CatalogDatabase") as mock_db_class:
                             mock_db = Mock()
+                            mock_db.get_downloaded.return_value = None
                             mock_db_class.return_value = mock_db
                             mock_db.save_downloaded.side_effect = Exception("Database error")
 
@@ -223,6 +226,7 @@ class TestDownloadDatabaseCaching:
 
                         with patch("cis_bench.catalog.database.CatalogDatabase") as mock_db_class:
                             mock_db = Mock()
+                            mock_db.get_downloaded.return_value = None
                             mock_db_class.return_value = mock_db
 
                             result = runner.invoke(
@@ -239,6 +243,65 @@ class TestDownloadDatabaseCaching:
                             calls = mock_db.save_downloaded.call_args_list
                             assert calls[0].kwargs["benchmark_id"] == "23598"
                             assert calls[1].kwargs["benchmark_id"] == "22605"
+
+
+    def test_download_multiple_benchmarks_cache_all_with_benchmarks(
+        self, runner, sample_benchmark, tmp_path
+    ):
+        """Benchmark-level parallel downloads still save each result to the catalog cache."""
+        with runner.isolated_filesystem():
+            catalog_path = tmp_path / "catalog.db"
+            catalog_path.touch()
+
+            with patch("cis_bench.cli.commands.download.Config") as mock_config:
+                mock_config.get_catalog_db_path.return_value = catalog_path
+                mock_config.get_verify_ssl.return_value = False
+
+                mock_session = Mock()
+                with patch(
+                    "cis_bench.cli.commands.download.AuthManager.get_or_create_session"
+                ) as mock_auth:
+                    mock_auth.return_value = mock_session
+
+                    with patch("cis_bench.cli.commands.download.WorkbenchScraper") as mock_scraper_class:
+                        mock_scraper_class._clone_session.return_value = mock_session
+                        mock_scraper = Mock()
+                        mock_scraper_class.return_value = mock_scraper
+
+                        with patch(
+                            "cis_bench.cli.commands.download._download_benchmark_with_shared_progress"
+                        ) as mock_parallel_download:
+                            mock_parallel_download.return_value = (sample_benchmark, 82.0)
+
+                            with patch(
+                                "cis_bench.cli.helpers.download_helper._create_progress"
+                            ) as mock_create_progress:
+                                mock_progress = MagicMock()
+                                mock_progress.__enter__.return_value = mock_progress
+                                mock_progress.__exit__.return_value = False
+                                mock_progress.console = MagicMock()
+                                mock_create_progress.return_value = mock_progress
+
+                                with patch("cis_bench.catalog.database.CatalogDatabase") as mock_db_class:
+                                    mock_db = Mock()
+                                    mock_db.get_downloaded.return_value = None
+                                    mock_db_class.return_value = mock_db
+
+                                    result = runner.invoke(
+                                        cli,
+                                        ["download", "23598", "22605", "--benchmarks", "2"],
+                                    )
+
+                                    assert result.exit_code == 0, f"Download failed: {result.output}"
+                                    assert mock_parallel_download.call_count == 2
+                                    assert mock_db.save_downloaded.call_count == 2
+                                    assert "Started 2 active download(s) for 2 benchmark(s)." in result.output
+                                    assert "Queued download" not in result.output
+                                    assert mock_progress.console.print.called
+
+                            calls = mock_db.save_downloaded.call_args_list
+                            saved_ids = sorted(call.kwargs["benchmark_id"] for call in calls)
+                            assert saved_ids == ["22605", "23598"]
 
 
 # ============================================================================
@@ -274,6 +337,7 @@ class TestDownloadAndExportIntegration:
 
                         with patch("cis_bench.catalog.database.CatalogDatabase") as mock_db_class:
                             mock_db = Mock()
+                            mock_db.get_downloaded.return_value = None
                             mock_db_class.return_value = mock_db
 
                             # Step 1: Download

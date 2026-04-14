@@ -4,6 +4,7 @@ Provides CRUD operations, search, and management for the CIS benchmark catalog.
 """
 
 import logging
+import re
 from pathlib import Path
 
 from sqlalchemy import text
@@ -452,35 +453,78 @@ class CatalogDatabase:
                 for c in communities
             ]
 
+    @staticmethod
+    def _normalize_title_for_latest(title: str | None) -> str:
+        """Normalize benchmark title for latest-version grouping."""
+        if not title:
+            return ""
+        return " ".join(title.lower().split())
+
+    @staticmethod
+    def _parse_version_for_latest(version: str | None) -> tuple[int, tuple[int, ...], str]:
+        """Parse version strings for latest-version sorting.
+
+        Sort precedence:
+        1. vNEXT-style versions
+        2. Numeric versions like v3.0.0
+        3. Other non-empty version strings
+        4. Missing versions
+        """
+        if not version:
+            return (0, tuple(), "")
+
+        cleaned = version.strip()
+        if not cleaned:
+            return (0, tuple(), "")
+
+        lowered = cleaned.lower()
+        if lowered == "vnext":
+            return (3, tuple(), lowered)
+
+        numbers = tuple(int(part) for part in re.findall(r"\d+", lowered))
+        if numbers:
+            return (2, numbers, lowered)
+
+        return (1, tuple(), lowered)
+
+    @classmethod
+    def _latest_sort_key(cls, benchmark: CatalogBenchmark) -> tuple:
+        """Build a deterministic sort key for latest-version selection."""
+        benchmark_id_num = int(benchmark.benchmark_id) if benchmark.benchmark_id.isdigit() else -1
+        return (
+            cls._parse_version_for_latest(benchmark.version),
+            benchmark.last_revision_date or "",
+            benchmark.published_date or "",
+            benchmark_id_num,
+            benchmark.benchmark_id,
+        )
+
     def mark_latest_versions(self):
-        """Mark latest version for each platform/title combination."""
+        """Mark only the newest version in each benchmark family as latest."""
         with Session(self.engine) as session:
-            # Complex query to find latest versions
-            # Group by base title (without version), get max version per group
-            # This is simplified - production would need smarter version comparison
+            benchmarks = session.exec(select(CatalogBenchmark)).all()
 
-            # For now: mark most recently published as latest
-            sql = """
-                UPDATE catalog_benchmarks
-                SET is_latest = CASE
-                    WHEN benchmark_id IN (
-                        SELECT b1.benchmark_id
-                        FROM catalog_benchmarks b1
-                        WHERE NOT EXISTS (
-                            SELECT 1 FROM catalog_benchmarks b2
-                            WHERE b2.title LIKE SUBSTR(b1.title, 1, INSTR(b1.title, 'v') - 1) || '%'
-                              AND b2.published_date > b1.published_date
-                              AND b2.status_id = b1.status_id
-                        )
-                    )
-                    THEN 1
-                    ELSE 0
-                END
-            """
-            session.execute(text(sql))
+            grouped: dict[tuple[str, int], list[CatalogBenchmark]] = {}
+            for benchmark in benchmarks:
+                benchmark.is_latest = False
+                key = (self._normalize_title_for_latest(benchmark.title), benchmark.status_id)
+                grouped.setdefault(key, []).append(benchmark)
+
+            for group in grouped.values():
+                latest = max(group, key=self._latest_sort_key)
+                latest.is_latest = True
+
             session.commit()
+            logger.info(f"Updated is_latest flags for {len(grouped)} benchmark families")
 
-            logger.info("Updated is_latest flags")
+    def clear_downloaded(self) -> int:
+        """Remove all downloaded benchmark cache entries."""
+        with Session(self.engine) as session:
+            count = session.execute(text("SELECT COUNT(*) FROM downloaded_benchmarks")).scalar_one()
+            session.execute(text("DELETE FROM downloaded_benchmarks"))
+            session.commit()
+            logger.info(f"Cleared {count} downloaded benchmark cache entries")
+            return count
 
     def save_downloaded(
         self,

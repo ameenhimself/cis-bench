@@ -106,6 +106,8 @@ cis-bench search oracle --output-format json | jq -r '.[].benchmark_id'
 ### Performance
 
 - Parallel catalog scraping (~2 min for 1,300+ benchmarks)
+- Controlled parallel downloads across benchmarks with `--benchmarks`
+- Parallel recommendation fetching within a benchmark with `--workers`
 - Retry logic with exponential backoff
 - Progress bars on long operations
 
@@ -163,16 +165,32 @@ oscap xccdf eval --profile Level_1 almalinux10-cis.xml
 
 ```bash
 # Search and download all cloud benchmarks
-cis-bench search --platform-type cloud --output-format json | \
-jq -r '.[].benchmark_id' | \
-head -5 | \
-xargs -I {} cis-bench download {}
+cis-bench search --platform-type cloud --output-format json | jq -r '.[].benchmark_id' | head -5 | xargs -I {} cis-bench download {} --benchmarks 2 --workers 4
 
 # Export all to DISA STIG format
-cis-bench list --output-format json | \
-jq -r '.[].file' | \
-xargs -I {} cis-bench export {} --format xccdf --style disa
+cis-bench list --output-format json | jq -r '.[].file' | xargs -I {} cis-bench export {} --format xccdf --style disa
 ```
+
+### Download Latest Benchmarks Faster
+
+```bash
+# Build the latest benchmark ID list
+cis-bench search --latest --output-format json | jq -r '.[].benchmark_id' > ids.txt
+
+# Download multiple benchmarks at once, while still parallelizing
+# recommendation pages inside each benchmark
+cis-bench download --file ids.txt --latest \
+  --benchmarks 2 \
+  --workers 4 \
+  -o ./all-benchmarks
+```
+
+**Concurrency guidance:**
+
+- `--benchmarks` controls how many benchmarks download at the same time
+- `--workers` controls how many recommendation pages are fetched in parallel inside each benchmark
+- Start with `--benchmarks 2 --workers 4`
+- Increase gradually if CIS WorkBench remains responsive
 
 ### Create Compliance Spreadsheet
 
@@ -263,8 +281,10 @@ NIST XCCDF Output
 - Database caching
 - Multiple export formats
 - Batch export (multiple benchmarks at once)
+- Controlled parallel benchmark downloads
 - XCCDF export (both DISA and CIS styles)
 - Parallel catalog scraping
+- Parallel recommendation fetching during downloads
 - Output formats for scripting (json/csv/yaml)
 
 **Future Features:**

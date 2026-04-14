@@ -13,7 +13,7 @@ Focuses on:
 
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -286,6 +286,63 @@ class TestDownloadFileInput:
                                 prefix="[1/1]",
                                 workers=4,
                             )
+
+
+    def test_download_benchmarks_use_parallel_path(self, runner, sample_benchmark):
+        """Download uses the benchmark-level worker pool when requested."""
+        with runner.isolated_filesystem():
+            with patch(
+                "cis_bench.cli.commands.download.AuthManager.get_or_create_session"
+            ) as mock_auth:
+                mock_session = Mock()
+                mock_auth.return_value = mock_session
+
+                with patch("cis_bench.cli.commands.download.Config") as mock_config:
+                    mock_config.get_catalog_db_path.return_value = Path("/nonexistent/catalog.db")
+
+                    with patch("cis_bench.cli.commands.download.WorkbenchScraper") as mock_scraper_class:
+                        mock_scraper_class._clone_session.return_value = mock_session
+                        mock_scraper = Mock()
+                        mock_scraper_class.return_value = mock_scraper
+
+                        with patch(
+                            "cis_bench.cli.commands.download._download_benchmark_with_shared_progress"
+                        ) as mock_parallel_download:
+                            mock_parallel_download.return_value = (sample_benchmark, 82.0)
+
+                            with patch(
+                                "cis_bench.cli.helpers.download_helper._create_progress"
+                            ) as mock_create_progress:
+                                mock_progress = MagicMock()
+                                mock_progress.__enter__.return_value = mock_progress
+                                mock_progress.__exit__.return_value = False
+                                mock_progress.console = MagicMock()
+                                mock_create_progress.return_value = mock_progress
+
+                                with patch(
+                                    "cis_bench.cli.helpers.download_helper.download_with_progress"
+                                ) as mock_progress_download:
+                                    result = runner.invoke(
+                                        cli,
+                                        [
+                                            "download",
+                                            "12345",
+                                            "67890",
+                                            "--benchmarks",
+                                            "2",
+                                            "--workers",
+                                            "4",
+                                        ],
+                                    )
+
+                                    assert result.exit_code == 0
+                                    assert mock_parallel_download.call_count == 2
+                                    mock_progress_download.assert_not_called()
+                                    assert all(call.args[4] == 4 for call in mock_parallel_download.call_args_list)
+                                    assert "parallel benchmark download" in result.output
+                                    assert "Started 2 active download(s) for 2 benchmark(s)." in result.output
+                                    assert "Queued download" not in result.output
+                                    assert mock_progress.console.print.called
 
 
     def test_download_latest_filters_non_latest_inputs(self, runner, sample_benchmark, tmp_path):

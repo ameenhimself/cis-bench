@@ -88,6 +88,13 @@ class TestDownloadCommandStructure:
         param_names = [p.name for p in download.params]
         assert "latest" in param_names
 
+    def test_download_has_benchmarks_option(self):
+        """download should have --benchmarks for controlled benchmark parallelism."""
+        from cis_bench.cli.commands.download import download
+
+        param_names = [p.name for p in download.params]
+        assert "benchmarks" in param_names
+
 
 class TestGetCommandStructure:
     """Verify get command does NOT have auth flags (DRY principle)."""
@@ -145,17 +152,17 @@ class TestExportCommandStructure:
 class TestNoSessionErrorMessage:
     """Verify helpful error when no saved session exists."""
 
-    def test_download_without_session_shows_auth_hint(self, cli_runner, mocker):
+    def test_download_without_session_shows_auth_hint(self, cli_runner):
         """download without session should tell user to run auth login."""
+        from unittest.mock import patch
+
         from cis_bench.cli.app import cli
 
-        # Mock no saved session
-        mocker.patch(
+        with patch(
             "cis_bench.fetcher.auth.AuthManager.get_or_create_session",
             side_effect=ValueError("No saved session found"),
-        )
-
-        result = cli_runner.invoke(cli, ["download", "23598"])
+        ):
+            result = cli_runner.invoke(cli, ["download", "23598"])
 
         # Should mention auth login
         assert "auth login" in result.output.lower() or result.exit_code != 0
