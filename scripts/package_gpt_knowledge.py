@@ -101,7 +101,7 @@ class LoadedBenchmark:
 class PackageStats:
     processed_files: int = 0
     skipped_files: int = 0
-    category_files: int = 0
+    bundle_files: int = 0
     benchmark_count: int = 0
     skip_reasons: dict[str, str] = field(default_factory=dict)
 
@@ -270,6 +270,13 @@ def infer_category(title: str) -> str:
         if any(hint in lowered for hint in hints):
             return CATEGORY_LABELS[category]
     return CATEGORY_LABELS[None]
+
+
+def extract_family_name(title: str) -> str:
+    family = re.sub(r"^\s*CIS\s+", "", title, flags=re.IGNORECASE).strip()
+    family = re.sub(r"\s+v(?:ersion\s+)?[0-9][\w.\-()]*\s*$", "", family, flags=re.IGNORECASE).strip()
+    family = re.sub(r"\s+", " ", family).strip(" -")
+    return family or title.strip()
 
 
 def validate_benchmark(benchmark: Benchmark) -> str | None:
@@ -441,6 +448,17 @@ def chunk_documents(title: str, docs: Iterable[str], max_chars: int) -> list[str
     return chunks
 
 
+def cleanup_output_dir(output_dir: Path) -> None:
+    if not output_dir.exists():
+        return
+
+    for path in output_dir.iterdir():
+        if not path.is_file():
+            continue
+        if path.suffix.lower() == ".md" or path.name == "manifest.json":
+            path.unlink()
+
+
 def build_manifest(
     output_dir: Path,
     grouped: dict[str, list[Benchmark]],
@@ -450,16 +468,17 @@ def build_manifest(
     manifest = {
         "processed_files": stats.processed_files,
         "skipped_files": stats.skipped_files,
-        "category_files": stats.category_files,
+        "bundle_files": stats.bundle_files,
         "summary_mode": "light-extractive",
-        "packaging_mode": "single-file" if len(grouped) == 1 and "all-benchmarks" in grouped else "category-bundles",
-        "categories": {
-            category: [
+        "packaging_mode": "single-file" if len(grouped) == 1 and "all-benchmarks" in grouped else "family-bundles",
+        "families": {
+            family: [
                 {
                     "benchmark_id": benchmark.benchmark_id,
                     "title": benchmark.title,
                     "version": benchmark.version,
                     "recommendations": benchmark.total_recommendations,
+                    "category": infer_category(benchmark.title),
                     **(
                         {"expected_recommendations": benchmark.expected_recommendations}
                         if benchmark.expected_recommendations is not None
@@ -468,7 +487,7 @@ def build_manifest(
                 }
                 for benchmark in benchmarks
             ]
-            for category, benchmarks in grouped.items()
+            for family, benchmarks in grouped.items()
         },
         "skipped_paths": sorted(skip_reasons),
         "skip_reasons": dict(sorted(skip_reasons.items())),
@@ -480,15 +499,16 @@ def package_downloads(
     input_dir: Path,
     output_dir: Path,
     max_chars: int = 1_200_000,
-    single_file: bool = False,
+    single_file: bool = True,
 ) -> PackageStats:
     output_dir.mkdir(parents=True, exist_ok=True)
+    cleanup_output_dir(output_dir)
     loaded_benchmarks, skip_reasons = iter_downloaded_benchmarks(input_dir)
 
     grouped: dict[str, list[Benchmark]] = defaultdict(list)
     for item in loaded_benchmarks:
-        category = "all-benchmarks" if single_file else infer_category(item.benchmark.title)
-        grouped[category].append(item.benchmark)
+        family = "all-benchmarks" if single_file else extract_family_name(item.benchmark.title)
+        grouped[family].append(item.benchmark)
 
     stats = PackageStats(
         processed_files=len(loaded_benchmarks),
@@ -509,22 +529,25 @@ def package_downloads(
         "Invalid files and benchmarks with verified recommendation-count mismatches were excluded.",
         "",
         "Generated bundles:",
-        f"Packaging mode: {'single-file' if single_file else 'category-bundles'}",
+        f"Packaging mode: {'single-file' if single_file else 'family-bundles'}",
     ]
 
-    for category in track(sorted(grouped), description="Writing bundles"):
-        benchmarks_in_category = sorted(
-            grouped[category],
+    for family in track(sorted(grouped), description="Writing bundles"):
+        benchmarks_in_family = sorted(
+            grouped[family],
             key=lambda b: (b.title.lower(), b.version.lower(), b.benchmark_id),
         )
-        rendered = [render_benchmark(benchmark) for benchmark in benchmarks_in_category]
-        chunks = chunk_documents(f"CIS Benchmarks - {category}", rendered, max_chars=max_chars)
+        rendered = [render_benchmark(benchmark) for benchmark in benchmarks_in_family]
+        if single_file:
+            chunks = [f"# CIS Benchmarks - {family}\n\n" + "\n".join(rendered).strip() + "\n"]
+        else:
+            chunks = chunk_documents(f"CIS Benchmarks - {family}", rendered, max_chars=max_chars)
 
-        index_lines.append(f"- {category}: {len(benchmarks_in_category)} benchmarks")
+        index_lines.append(f"- {family}: {len(benchmarks_in_family)} benchmarks")
         for idx, chunk in enumerate(chunks, start=1):
-            filename = f"{slugify(category)}-{idx:02d}.md"
+            filename = f"{slugify(family)}-{idx:02d}.md"
             (output_dir / filename).write_text(chunk, encoding="utf-8")
-            stats.category_files += 1
+            stats.bundle_files += 1
             index_lines.append(f"  File: {filename}")
 
     if skip_reasons:
@@ -561,8 +584,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--single-file",
+        dest="single_file",
         action="store_true",
-        help="Package all benchmarks into one logical bundle instead of category bundles",
+        default=True,
+        help="Package all benchmarks into one logical bundle (default)",
+    )
+    parser.add_argument(
+        "--family-bundles",
+        dest="single_file",
+        action="store_false",
+        help="Package benchmarks into family-based bundles instead of one single bundle",
     )
     return parser
 
@@ -583,7 +614,7 @@ def main() -> int:
 
     print(f"Processed {stats.processed_files} benchmark files")
     print(f"Skipped {stats.skipped_files} files that were incomplete or invalid")
-    print(f"Wrote {stats.category_files} Markdown knowledge bundle(s) to {args.output_dir}")
+    print(f"Wrote {stats.bundle_files} Markdown knowledge bundle(s) to {args.output_dir}")
     return 0
 
 

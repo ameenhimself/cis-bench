@@ -12,7 +12,7 @@ pytestmark = pytest.mark.scripts
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
-from package_gpt_knowledge import package_downloads  # noqa: E402
+from package_gpt_knowledge import extract_family_name, package_downloads  # noqa: E402
 
 
 def make_benchmark(
@@ -68,7 +68,33 @@ def make_benchmark(
 
 
 class TestPackageDownloads:
-    def test_package_downloads_groups_by_category_and_skips_invalid(self, tmp_path):
+    def test_package_downloads_defaults_to_single_file_bundle(self, tmp_path):
+        input_dir = tmp_path / "downloads"
+        output_dir = tmp_path / "knowledge"
+        input_dir.mkdir()
+
+        make_benchmark("1", "CIS Ubuntu Linux 22.04 Benchmark", "v1.0.0").to_json_file(
+            input_dir / "ubuntu.json"
+        )
+        make_benchmark("2", "CIS AWS Foundations Benchmark", "v1.0.0").to_json_file(
+            input_dir / "aws.json"
+        )
+
+        stats = package_downloads(input_dir, output_dir, max_chars=100000)
+
+        assert stats.bundle_files == 1
+        assert (output_dir / "all-benchmarks-01.md").exists()
+        manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["packaging_mode"] == "single-file"
+
+    def test_extract_family_name_preserves_meaningful_suffixes(self):
+        assert extract_family_name("CIS Ubuntu Linux 22.04 LTS Benchmark v3.0.0") == "Ubuntu Linux 22.04 LTS Benchmark"
+        assert extract_family_name("CIS Amazon Linux 2 STIG Benchmark v2.0.0") == "Amazon Linux 2 STIG Benchmark"
+        assert extract_family_name(
+            "CIS Apple macOS 14.0 Sonoma Cloud-tailored Benchmark v1.1.0"
+        ) == "Apple macOS 14.0 Sonoma Cloud-tailored Benchmark"
+
+    def test_package_downloads_groups_by_family_and_skips_invalid(self, tmp_path):
         input_dir = tmp_path / "downloads"
         output_dir = tmp_path / "knowledge"
         input_dir.mkdir()
@@ -81,7 +107,7 @@ class TestPackageDownloads:
         )
         (input_dir / "partial.json").write_text("{invalid", encoding="utf-8")
 
-        stats = package_downloads(input_dir, output_dir, max_chars=100000)
+        stats = package_downloads(input_dir, output_dir, max_chars=100000, single_file=False)
 
         assert stats.processed_files == 2
         assert stats.skipped_files == 1
@@ -89,14 +115,16 @@ class TestPackageDownloads:
         assert (output_dir / "README.md").exists()
         assert (output_dir / "manifest.json").exists()
         files = sorted(path.name for path in output_dir.glob("*.md"))
-        assert "cloud-01.md" in files
-        assert "operating-systems-01.md" in files
+        assert "aws-foundations-benchmark-01.md" in files
+        assert "ubuntu-linux-22-04-benchmark-01.md" in files
 
         manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
         assert manifest["summary_mode"] == "light-extractive"
+        assert manifest["packaging_mode"] == "family-bundles"
         assert manifest["skip_reasons"]["partial.json"] == "invalid benchmark JSON"
+        assert "Ubuntu Linux 22.04 Benchmark" in manifest["families"]
 
-    def test_package_downloads_splits_large_output(self, tmp_path):
+    def test_package_downloads_splits_large_output_within_family(self, tmp_path):
         input_dir = tmp_path / "downloads"
         output_dir = tmp_path / "knowledge"
         input_dir.mkdir()
@@ -105,14 +133,14 @@ class TestPackageDownloads:
             "1", "CIS Ubuntu Linux 22.04 Benchmark", "v1.0.0", recommendation_count=4
         ).to_json_file(input_dir / "ubuntu-a.json")
         make_benchmark(
-            "2", "CIS Ubuntu Linux 24.04 Benchmark", "v1.0.0", recommendation_count=4
+            "2", "CIS Ubuntu Linux 22.04 Benchmark", "v1.0.1", recommendation_count=4
         ).to_json_file(input_dir / "ubuntu-b.json")
 
-        stats = package_downloads(input_dir, output_dir, max_chars=1500)
+        stats = package_downloads(input_dir, output_dir, max_chars=1500, single_file=False)
 
-        assert stats.category_files >= 2
-        os_files = sorted(path.name for path in output_dir.glob("operating-systems-*.md"))
-        assert len(os_files) >= 2
+        assert stats.bundle_files >= 2
+        family_files = sorted(path.name for path in output_dir.glob("ubuntu-linux-22-04-benchmark-*.md"))
+        assert len(family_files) >= 2
 
     def test_recommendation_rendering_is_source_faithful_and_structured(self, tmp_path):
         input_dir = tmp_path / "downloads"
@@ -122,9 +150,9 @@ class TestPackageDownloads:
         benchmark = make_benchmark("1", "CIS Ubuntu Linux 22.04 Benchmark", "v1.0.0")
         benchmark.to_json_file(input_dir / "ubuntu.json")
 
-        package_downloads(input_dir, output_dir, max_chars=100000)
+        package_downloads(input_dir, output_dir, max_chars=100000, single_file=False)
 
-        content = (output_dir / "operating-systems-01.md").read_text(encoding="utf-8")
+        content = (output_dir / "ubuntu-linux-22-04-benchmark-01.md").read_text(encoding="utf-8")
         assert "## CIS Ubuntu Linux 22.04 Benchmark" in content
         assert "Recommendations Included: 1" in content
         assert "### 1.1 Recommendation 1" in content
@@ -161,9 +189,9 @@ class TestPackageDownloads:
         )
         benchmark.to_json_file(input_dir / "ubuntu.json")
 
-        package_downloads(input_dir, output_dir, max_chars=100000)
+        package_downloads(input_dir, output_dir, max_chars=100000, single_file=False)
 
-        content = (output_dir / "operating-systems-01.md").read_text(encoding="utf-8")
+        content = (output_dir / "ubuntu-linux-22-04-benchmark-01.md").read_text(encoding="utf-8")
         assert "1. Step one" in content
         assert "2. Step two" in content
         assert "[Reference doc](https://example.com/doc)" in content
@@ -182,7 +210,7 @@ class TestPackageDownloads:
         )
         mismatched.to_json_file(input_dir / "mismatch.json")
 
-        stats = package_downloads(input_dir, output_dir, max_chars=100000)
+        stats = package_downloads(input_dir, output_dir, max_chars=100000, single_file=False)
 
         assert stats.processed_files == 0
         assert stats.skipped_files == 1
@@ -196,6 +224,44 @@ class TestPackageDownloads:
         assert manifest["skip_reasons"]["mismatch.json"].startswith(
             "expected_recommendations does not match total_recommendations"
         )
+
+    def test_rerun_cleans_old_bundle_files(self, tmp_path):
+        input_dir = tmp_path / "downloads"
+        output_dir = tmp_path / "knowledge"
+        input_dir.mkdir()
+        output_dir.mkdir()
+
+        (output_dir / "legacy-bundle-01.md").write_text("old", encoding="utf-8")
+        (output_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        (output_dir / "README.md").write_text("old readme", encoding="utf-8")
+
+        make_benchmark("1", "CIS Ubuntu Linux 22.04 Benchmark", "v1.0.0").to_json_file(
+            input_dir / "ubuntu.json"
+        )
+
+        package_downloads(input_dir, output_dir, max_chars=100000, single_file=False)
+
+        assert not (output_dir / "legacy-bundle-01.md").exists()
+        assert (output_dir / "README.md").exists()
+        assert (output_dir / "manifest.json").exists()
+        assert (output_dir / "ubuntu-linux-22-04-benchmark-01.md").exists()
+
+    def test_single_file_mode_ignores_chunk_limit(self, tmp_path):
+        input_dir = tmp_path / "downloads"
+        output_dir = tmp_path / "knowledge"
+        input_dir.mkdir()
+
+        make_benchmark(
+            "1", "CIS Ubuntu Linux 22.04 Benchmark", "v1.0.0", recommendation_count=4
+        ).to_json_file(input_dir / "ubuntu-a.json")
+        make_benchmark(
+            "2", "CIS AWS Foundations Benchmark", "v1.0.0", recommendation_count=4
+        ).to_json_file(input_dir / "aws.json")
+
+        stats = package_downloads(input_dir, output_dir, max_chars=1500, single_file=True)
+
+        assert stats.bundle_files == 1
+        assert sorted(path.name for path in output_dir.glob("all-benchmarks-*.md")) == ["all-benchmarks-01.md"]
 
     def test_package_downloads_can_emit_single_file_bundle(self, tmp_path):
         input_dir = tmp_path / "downloads"
@@ -211,7 +277,7 @@ class TestPackageDownloads:
 
         stats = package_downloads(input_dir, output_dir, max_chars=100000, single_file=True)
 
-        assert stats.category_files == 1
+        assert stats.bundle_files == 1
         assert (output_dir / "all-benchmarks-01.md").exists()
         manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
         assert manifest["packaging_mode"] == "single-file"
@@ -227,9 +293,9 @@ class TestPackageDownloads:
             encoding="utf-8",
         )
 
-        package_downloads(input_dir, output_dir, max_chars=2000000)
+        package_downloads(input_dir, output_dir, max_chars=2000000, single_file=False)
 
-        content = (output_dir / "operating-systems-01.md").read_text(encoding="utf-8")
+        content = (output_dir / "almalinux-os-8-benchmark-01.md").read_text(encoding="utf-8")
         assert "#### Audit" in content
         assert "#### Remediation" in content
         assert "```text" in content
