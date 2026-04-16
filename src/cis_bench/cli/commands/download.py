@@ -109,12 +109,46 @@ def _get_cached_download(benchmark_id, catalog_db_path):
         return None
 
 
+def _is_cached_download_complete(existing):
+    """Return True when a cached download is known to be complete."""
+    if not existing:
+        return False
+
+    expected = existing.get("expected_recommendation_count")
+    actual = existing.get("recommendation_count")
+    is_complete = existing.get("is_complete")
+
+    # Legacy cache rows without completeness metadata are treated as incomplete
+    # so they are refreshed once and then become restart-safe.
+    if expected is None or is_complete is None:
+        return False
+
+    return bool(is_complete) and actual == expected
+
+
 def _print_cached_download(prefix, benchmark_id, existing):
     """Print a cached-download skip message."""
     console.print(f"{prefix} [yellow]Benchmark {benchmark_id} already cached[/yellow]")
     console.print(f"      Downloaded: {existing['downloaded_at']}")
-    console.print(f"      Recommendations: {existing['recommendation_count']}")
+    console.print(
+        "      Recommendations: "
+        f"{existing['recommendation_count']}/{existing['expected_recommendation_count']}"
+    )
     console.print("\n[dim]Use --force to re-download[/dim]\n")
+
+
+def _print_incomplete_cached_download(prefix, benchmark_id, existing):
+    """Explain why an existing cache row will be re-downloaded."""
+    actual = existing.get("recommendation_count")
+    expected = existing.get("expected_recommendation_count")
+    if expected is None:
+        console.print(
+            f"{prefix} [yellow]Benchmark {benchmark_id} cache is missing completeness metadata; re-downloading to verify it.[/yellow]"
+        )
+    else:
+        console.print(
+            f"{prefix} [yellow]Benchmark {benchmark_id} cache is incomplete ({actual}/{expected}); re-downloading missing content.[/yellow]"
+        )
 
 
 def _save_benchmark_to_catalog(benchmark_id, benchmark, catalog_db_path):
@@ -132,11 +166,14 @@ def _save_benchmark_to_catalog(benchmark_id, benchmark, catalog_db_path):
         recommendation_count = len(benchmark.recommendations)
 
         db = CatalogDatabase(catalog_db_path)
+        expected_recommendation_count = benchmark.expected_recommendations or recommendation_count
         db.save_downloaded(
             benchmark_id=benchmark_id,
             content_json=content_json,
             content_hash=content_hash,
             recommendation_count=recommendation_count,
+            expected_recommendation_count=expected_recommendation_count,
+            is_complete=recommendation_count == expected_recommendation_count,
         )
         logger.debug(f"Saved benchmark {benchmark_id} to catalog database")
         return recommendation_count
@@ -379,10 +416,12 @@ def download(
 
         if not force:
             existing = _get_cached_download(benchmark_id, catalog_db_path)
-            if existing:
+            if existing and _is_cached_download_complete(existing):
                 _print_cached_download(prefix, benchmark_id, existing)
                 logger.debug(f"Skipping {benchmark_id} - already cached")
                 continue
+            if existing:
+                _print_incomplete_cached_download(prefix, benchmark_id, existing)
 
         pending_downloads.append((idx, url, benchmark_id, prefix))
 

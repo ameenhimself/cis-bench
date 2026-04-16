@@ -17,6 +17,21 @@ console = Console()
 logger = logging.getLogger(__name__)
 
 
+def _is_cached_download_complete(existing):
+    """Return True when a cached benchmark is known complete."""
+    if not existing:
+        return False
+
+    expected = existing.get("expected_recommendation_count")
+    actual = existing.get("recommendation_count")
+    is_complete = existing.get("is_complete")
+
+    if expected is None or is_complete is None:
+        return False
+
+    return bool(is_complete) and actual == expected
+
+
 def get_available_xccdf_styles():
     """Get available XCCDF styles for CLI validation."""
     return XCCDFExporter._get_available_styles()
@@ -228,11 +243,14 @@ def get_cmd(query, export_format, style, output, verbose, debug, quiet, non_inte
             content_hash = hashlib.sha256(content_json.encode()).hexdigest()
             recommendation_count = len(benchmark.recommendations)
 
+            expected_recommendation_count = benchmark.expected_recommendations or recommendation_count
             db.save_downloaded(
                 benchmark_id=benchmark_id,
                 content_json=content_json,
                 content_hash=content_hash,
                 recommendation_count=recommendation_count,
+                expected_recommendation_count=expected_recommendation_count,
+                is_complete=recommendation_count == expected_recommendation_count,
             )
 
             logger.debug(f"Saved benchmark {benchmark_id} to database")

@@ -180,6 +180,8 @@ class DownloadedBenchmark(SQLModel, table=True):
     # Metadata
     file_size: int | None = None
     recommendation_count: int | None = None
+    expected_recommendation_count: int | None = None
+    is_complete: bool = Field(default=False)
 
     # Timestamps
     downloaded_at: datetime = Field(default_factory=utcnow)

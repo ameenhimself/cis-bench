@@ -48,6 +48,15 @@ def _load_benchmark_from_db(identifier, catalog_db_path):
     if not downloaded:
         return None, f"Benchmark {identifier} not downloaded"
 
+    expected = downloaded.get("expected_recommendation_count")
+    actual = downloaded.get("recommendation_count")
+    is_complete = downloaded.get("is_complete")
+    if expected is None or is_complete is None or not is_complete or actual != expected:
+        return None, (
+            f"Benchmark {identifier} cache is incomplete or legacy-unknown "
+            f"({actual}/{expected if expected is not None else '?'})"
+        )
+
     benchmark_data = json.loads(downloaded["content_json"])
     benchmark = Benchmark(**benchmark_data)
     return benchmark, identifier

@@ -133,7 +133,10 @@ navtree.json
 /output/
 /benchmarks/
 /benchmark_*.json
+/benchmark_*.md
 /all-benchmarks/
+/gpt-knowledge/
+/tmp-gpt-knowledge-smoke/
 /speed-test/
 
 # Project-specific: Internal documentation (not for repo)

@@ -355,6 +355,8 @@ class TestDownloadAndExportIntegration:
                                 "content_json": sample_benchmark.model_dump_json(),
                                 "downloaded_at": datetime.now(),
                                 "recommendation_count": 2,
+                                "expected_recommendation_count": 2,
+                                "is_complete": True,
                             }
 
                             # Step 2: Export by ID (with mocked Config for export too)

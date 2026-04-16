@@ -56,7 +56,7 @@ class CatalogDownloader:
         # Check if already downloaded
         existing = self.db.get_downloaded(benchmark_id)
 
-        if existing and not force:
+        if existing and not force and existing.get("is_complete"):
             logger.debug("Benchmark already downloaded, checking if up-to-date")
 
             # Compare revision dates if available
@@ -95,6 +95,10 @@ class CatalogDownloader:
                 content_json=content_json,
                 content_hash=content_hash,
                 recommendation_count=len(benchmark.recommendations),
+                expected_recommendation_count=(
+                    benchmark.expected_recommendations or len(benchmark.recommendations)
+                ),
+                is_complete=(len(benchmark.recommendations) == (benchmark.expected_recommendations or len(benchmark.recommendations))),
                 workbench_last_modified=catalog_entry.get("last_revision_date"),
             )
 

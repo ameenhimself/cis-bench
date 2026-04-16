@@ -40,8 +40,45 @@ class CatalogDatabase:
         # Create engine
         db_url = f"sqlite:///{self.db_path}"
         self.engine = create_engine(db_url, echo=False)
+        self._ensure_downloaded_benchmarks_schema()
 
         logger.debug(f"Initialized catalog database: {self.db_path}")
+
+    def _ensure_downloaded_benchmarks_schema(self):
+        """Ensure downloaded benchmark cache has completeness-tracking columns."""
+        with Session(self.engine) as session:
+            table_exists = session.execute(
+                text(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='downloaded_benchmarks'"
+                )
+            ).first()
+            if not table_exists:
+                return
+
+            columns = {
+                row[1] for row in session.execute(text("PRAGMA table_info(downloaded_benchmarks)")).fetchall()
+            }
+
+            if "expected_recommendation_count" not in columns:
+                session.execute(
+                    text(
+                        "ALTER TABLE downloaded_benchmarks ADD COLUMN expected_recommendation_count INTEGER"
+                    )
+                )
+
+            if "is_complete" not in columns:
+                session.execute(
+                    text(
+                        "ALTER TABLE downloaded_benchmarks ADD COLUMN is_complete BOOLEAN NOT NULL DEFAULT 0"
+                    )
+                )
+                session.execute(
+                    text(
+                        "UPDATE downloaded_benchmarks SET is_complete = 0 WHERE is_complete IS NULL"
+                    )
+                )
+
+            session.commit()
 
     def initialize_schema(self):
         """Create all tables and indexes."""
@@ -49,6 +86,7 @@ class CatalogDatabase:
 
         # Create all tables from SQLModel models
         SQLModel.metadata.create_all(self.engine)
+        self._ensure_downloaded_benchmarks_schema()
 
         # Insert default statuses
         with Session(self.engine) as session:
@@ -533,8 +571,18 @@ class CatalogDatabase:
         content_hash: str,
         recommendation_count: int,
         workbench_last_modified: str | None = None,
+        expected_recommendation_count: int | None = None,
+        is_complete: bool | None = None,
     ):
         """Save downloaded benchmark content."""
+        self._ensure_downloaded_benchmarks_schema()
+
+        if expected_recommendation_count is None:
+            expected_recommendation_count = recommendation_count
+
+        if is_complete is None:
+            is_complete = recommendation_count == expected_recommendation_count
+
         with Session(self.engine) as session:
             existing = session.get(DownloadedBenchmark, benchmark_id)
 
@@ -542,6 +590,8 @@ class CatalogDatabase:
                 existing.content_json = content_json
                 existing.content_hash = content_hash
                 existing.recommendation_count = recommendation_count
+                existing.expected_recommendation_count = expected_recommendation_count
+                existing.is_complete = is_complete
                 existing.file_size = len(content_json)
                 existing.workbench_last_modified = workbench_last_modified
             else:
@@ -551,15 +601,25 @@ class CatalogDatabase:
                     content_hash=content_hash,
                     file_size=len(content_json),
                     recommendation_count=recommendation_count,
+                    expected_recommendation_count=expected_recommendation_count,
+                    is_complete=is_complete,
                     workbench_last_modified=workbench_last_modified,
                 )
                 session.add(downloaded)
 
             session.commit()
-            logger.debug(f"Saved downloaded benchmark: {benchmark_id}")
+            logger.debug(
+                "Saved downloaded benchmark: %s (complete=%s, recommendations=%s/%s)",
+                benchmark_id,
+                is_complete,
+                recommendation_count,
+                expected_recommendation_count,
+            )
 
     def get_downloaded(self, benchmark_id: str) -> dict | None:
         """Get downloaded benchmark."""
+        self._ensure_downloaded_benchmarks_schema()
+
         with Session(self.engine) as session:
             downloaded = session.get(DownloadedBenchmark, benchmark_id)
 
@@ -572,6 +632,8 @@ class CatalogDatabase:
                 "content_hash": downloaded.content_hash,
                 "downloaded_at": downloaded.downloaded_at,
                 "recommendation_count": downloaded.recommendation_count,
+                "expected_recommendation_count": downloaded.expected_recommendation_count,
+                "is_complete": downloaded.is_complete,
                 "workbench_last_modified": downloaded.workbench_last_modified,
             }
 

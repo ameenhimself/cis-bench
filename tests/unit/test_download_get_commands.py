@@ -476,6 +476,8 @@ class TestDownloadCacheSkip:
                             "benchmark_id": "12345",
                             "downloaded_at": "2025-01-01T00:00:00",
                             "recommendation_count": 10,
+                            "expected_recommendation_count": 10,
+                            "is_complete": True,
                         }
 
                         result = runner.invoke(cli, ["download", "12345"])

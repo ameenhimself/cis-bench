@@ -139,6 +139,11 @@ class Benchmark(BaseModel):
     scraper_version: str = Field(..., description="Scraper strategy version used")
 
     total_recommendations: int = Field(..., ge=0)
+    expected_recommendations: int | None = Field(
+        default=None,
+        ge=0,
+        description="Expected recommendation count discovered from the WorkBench navtree",
+    )
     recommendations: list[Recommendation] = Field(...)
 
     @field_validator("recommendations")

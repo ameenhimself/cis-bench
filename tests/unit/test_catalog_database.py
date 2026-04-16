@@ -434,6 +434,24 @@ class TestDownloadedBenchmarks:
         assert downloaded["content_hash"] == "hash2"
         assert downloaded["recommendation_count"] == 150
 
+    def test_save_downloaded_tracks_incomplete_cache_entries(self, temp_db, sample_benchmark_data):
+        """Incomplete downloads should be flagged so restart logic re-downloads them."""
+        temp_db.insert_benchmark(sample_benchmark_data)
+
+        temp_db.save_downloaded(
+            "23598",
+            '{"v": 1}',
+            "hash1",
+            95,
+            expected_recommendation_count=100,
+            is_complete=False,
+        )
+
+        downloaded = temp_db.get_downloaded("23598")
+        assert downloaded["recommendation_count"] == 95
+        assert downloaded["expected_recommendation_count"] == 100
+        assert downloaded["is_complete"] is False
+
     def test_get_nonexistent_downloaded(self, temp_db):
         """Test getting non-existent download returns None."""
         downloaded = temp_db.get_downloaded("99999")

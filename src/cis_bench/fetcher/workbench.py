@@ -334,6 +334,7 @@ class WorkbenchScraper:
                 self._detected_strategy.version if self._detected_strategy else "manual"
             ),
             total_recommendations=len(final_recommendations),
+            expected_recommendations=total,
             recommendations=final_recommendations,
             downloaded_at=datetime.now(),
         )
