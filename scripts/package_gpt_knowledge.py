@@ -506,9 +506,16 @@ def package_downloads(
     loaded_benchmarks, skip_reasons = iter_downloaded_benchmarks(input_dir)
 
     grouped: dict[str, list[Benchmark]] = defaultdict(list)
+    sorted_grouped: dict[str, list[Benchmark]] = {}
     for item in loaded_benchmarks:
         family = "all-benchmarks" if single_file else extract_family_name(item.benchmark.title)
         grouped[family].append(item.benchmark)
+
+    for family, benchmarks in grouped.items():
+        sorted_grouped[family] = sorted(
+            benchmarks,
+            key=lambda b: (b.title.lower(), b.version.lower(), b.benchmark_id),
+        )
 
     stats = PackageStats(
         processed_files=len(loaded_benchmarks),
@@ -532,18 +539,26 @@ def package_downloads(
         f"Packaging mode: {'single-file' if single_file else 'family-bundles'}",
     ]
 
-    for family in track(sorted(grouped), description="Writing bundles"):
-        benchmarks_in_family = sorted(
-            grouped[family],
-            key=lambda b: (b.title.lower(), b.version.lower(), b.benchmark_id),
-        )
-        rendered = [render_benchmark(benchmark) for benchmark in benchmarks_in_family]
+    render_queue: list[tuple[str, Benchmark]] = [
+        (family, benchmark)
+        for family in sorted(sorted_grouped)
+        for benchmark in sorted_grouped[family]
+    ]
+    rendered_by_family: dict[str, list[str]] = defaultdict(list)
+    for family, benchmark in track(render_queue, description="Rendering benchmarks"):
+        rendered_by_family[family].append(render_benchmark(benchmark))
+
+    prepared_bundles: list[tuple[str, int, list[str]]] = []
+    for family in sorted(sorted_grouped):
+        rendered = rendered_by_family[family]
         if single_file:
             chunks = [f"# CIS Benchmarks - {family}\n\n" + "\n".join(rendered).strip() + "\n"]
         else:
             chunks = chunk_documents(f"CIS Benchmarks - {family}", rendered, max_chars=max_chars)
+        prepared_bundles.append((family, len(sorted_grouped[family]), chunks))
 
-        index_lines.append(f"- {family}: {len(benchmarks_in_family)} benchmarks")
+    for family, benchmark_count, chunks in track(prepared_bundles, description="Writing bundles"):
+        index_lines.append(f"- {family}: {benchmark_count} benchmarks")
         for idx, chunk in enumerate(chunks, start=1):
             filename = f"{slugify(family)}-{idx:02d}.md"
             (output_dir / filename).write_text(chunk, encoding="utf-8")
