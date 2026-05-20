@@ -1,254 +1,155 @@
-# CIS Benchmark CLI
+# CIS Benchmark GPT Bundle Toolkit
 
-> Download, search, cache, and export CIS Benchmarks from CIS WorkBench.
+> Bulk-download the latest CIS Benchmarks and package them into source-faithful Markdown for Custom GPT knowledge.
 
-[![PyPI version](https://img.shields.io/pypi/v/cis-bench.svg)](https://pypi.org/project/cis-bench/)
 [![Python Version](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![CI](https://github.com/mitre/cis-bench/actions/workflows/ci.yml/badge.svg)](https://github.com/mitre/cis-bench/actions/workflows/ci.yml)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-## Overview
+## Purpose
 
-`cis-bench` is a Python CLI for working with CIS Benchmarks from CIS WorkBench. It helps you:
+This fork is optimized for one practical workflow: pull the latest CIS Benchmark content from CIS WorkBench, verify that downloaded benchmarks are complete, and convert the raw benchmark JSON into a Custom GPT-friendly Markdown knowledge file.
 
-- search the benchmark catalog locally
-- authenticate once and reuse a saved session
-- download benchmark content into a local cache
-- export benchmarks to JSON, YAML, CSV, Markdown, and XCCDF
-- generate XCCDF in either CIS-native or DISA-style layouts
+The generated GPT knowledge keeps the original CIS recommendation substance intact, especially:
 
-This repository is best thought of as both:
+- Description
+- Rationale
+- Audit
+- Remediation
+- Default Value
+- References
 
-- a user-facing CLI for security and compliance workflows
-- a developer project with a scraper, local catalog database, exporters, and tests
+It adds only light deterministic summaries and structure so a Custom GPT can retrieve, summarize, and cite the benchmark evidence more reliably.
 
-## Quick Start
+## Recommended Workflow
 
-```bash
-# Install one way
-pipx install cis-bench
-# or
-uv tool install cis-bench
-# or
-pip install cis-bench
-
-# Authenticate once
-cis-bench auth login --browser chrome
-
-# Build the local catalog metadata cache
-cis-bench catalog refresh
-
-# Search locally
-cis-bench search "ubuntu 22"
-
-# Download and export a benchmark
-cis-bench download 23598
-cis-bench export 23598 --format xccdf --style cis
-```
-
-If you want the all-in-one path:
+Authenticate once:
 
 ```bash
-cis-bench get "ubuntu 22" --format xccdf --style cis
+python -m cis_bench auth login --browser edge
 ```
 
-## How It Works
+If browser cookie extraction does not work on Windows, use the login command's cookie-file import support.
 
-### Authentication
-
-`cis-bench` uses your CIS WorkBench session. Typical flow:
+Refresh the local catalog metadata:
 
 ```bash
-cis-bench auth login --browser chrome
+python -m cis_bench catalog refresh
 ```
 
-If browser cookie extraction is awkward on your machine, the login command also supports importing cookies from a file.
-
-### Catalog Refresh
-
-`catalog refresh` builds a local metadata database for search and discovery. It does not download every full benchmark document.
+Create the full Custom GPT deliverable:
 
 ```bash
-cis-bench catalog refresh
+python -m cis_bench gpt-bundle --benchmarks 2 --workers 4
 ```
 
-Use the catalog when you want fast local search, latest-version filtering, and platform discovery.
+By default, this creates a dated folder such as:
 
-### Benchmark Download
+```text
+CIS Benchmarks 200526/
+  Raw Files/
+    <raw benchmark JSON files>
+  all-benchmarks-01.md
+  README.md
+  manifest.json
+  RECEIPT.md
+```
 
-`download` fetches the actual benchmark content and stores it in the local downloaded-benchmark cache.
+Upload `all-benchmarks-01.md` to the Custom GPT knowledge section. Keep `Raw Files` as the verified source archive.
+
+## What `gpt-bundle` Does
+
+`gpt-bundle` is the safest path for bulk download and GPT packaging:
+
+- selects only benchmarks marked latest in the local catalog
+- downloads into a staging folder first
+- validates JSON/model parsing and recommendation counts
+- retries missing or incomplete benchmarks
+- moves verified raw files into `Raw Files`
+- generates a source-faithful Markdown knowledge bundle
+- writes a short receipt with counts, next steps, and credits
+
+Use `--overwrite` if the dated output folder already exists:
 
 ```bash
-cis-bench download 23598
-cis-bench download --file ids.txt --latest
+python -m cis_bench gpt-bundle --overwrite --benchmarks 2 --workers 4
 ```
 
-### Export
+## Speed Tuning
 
-Downloaded benchmarks can be exported without re-fetching from CIS WorkBench.
+There are two layers of parallelism:
 
-```bash
-cis-bench export 23598 --format json
-cis-bench export 23598 --format xccdf --style disa
-```
-
-## Common Workflows
-
-### Search for the latest published benchmark
-
-```bash
-cis-bench search "amazon linux" --latest
-```
-
-### Download many latest benchmarks
-
-```bash
-cis-bench search --latest --output-format json | jq -r '.[].benchmark_id' > ids.txt
-cis-bench download --file ids.txt --latest -o ./all-benchmarks
-```
-
-### Faster bulk downloads
-
-`download` supports two layers of concurrency:
-
-- `--benchmarks`: how many benchmarks download at the same time
+- `--benchmarks`: how many benchmark documents download at the same time
 - `--workers`: how many recommendation pages are fetched in parallel inside each benchmark
 
-Good starting point:
+Start conservatively:
 
 ```bash
-cis-bench download --file ids.txt --latest \
-  --benchmarks 2 \
-  --workers 4 \
-  -o ./all-benchmarks
+python -m cis_bench gpt-bundle --benchmarks 2 --workers 4
 ```
 
-Increase gradually if CIS WorkBench stays responsive for you.
-
-### Export for SCAP tools
+If CIS WorkBench remains responsive, try:
 
 ```bash
-cis-bench export 23598 --format xccdf --style cis -o benchmark.xml
+python -m cis_bench gpt-bundle --benchmarks 4 --workers 6
 ```
 
-### Export for spreadsheets or downstream automation
+Avoid extreme values unless you are prepared for throttling, timeouts, or incomplete downloads that need retrying.
+
+## Existing CLI Capabilities
+
+This fork still keeps the general `cis-bench` CLI behavior from upstream:
 
 ```bash
-cis-bench export 23598 --format csv -o benchmark.csv
-cis-bench export 23598 --format json -o benchmark.json
+python -m cis_bench catalog refresh
+python -m cis_bench search "ubuntu 22" --latest
+python -m cis_bench download 23598
+python -m cis_bench export 23598 --format xccdf --style cis
 ```
 
-## Key Commands
+Useful commands:
 
 ```bash
-cis-bench auth login
-cis-bench catalog refresh
-cis-bench search <query>
-cis-bench get <query>
-cis-bench download <benchmark-id>
-cis-bench export <benchmark-id>
-cis-bench list
-cis-bench info <benchmark-id>
+python -m cis_bench auth login
+python -m cis_bench catalog refresh
+python -m cis_bench search <query>
+python -m cis_bench download <benchmark-id>
+python -m cis_bench export <benchmark-id>
+python -m cis_bench gpt-bundle
+python -m cis_bench --help
 ```
 
-For full option details, use `--help`:
+`catalog refresh` downloads search metadata only. `download` and `gpt-bundle` pull full benchmark content to your machine.
+
+## Developer Setup
 
 ```bash
-cis-bench --help
-cis-bench download --help
-```
-
-## Output and Caching Model
-
-There are two important local stores:
-
-- catalog database: search metadata produced by `cis-bench catalog refresh`
-- downloaded benchmark cache: full benchmark content produced by `cis-bench download` or `cis-bench get`
-
-That distinction matters:
-
-- `catalog refresh` is for discovery and latest-version selection
-- `download` is for pulling benchmark content to your machine
-- `export` can work from cached downloaded content
-
-## XCCDF Support
-
-Two XCCDF styles are supported:
-
-- `--style cis`: CIS-native XCCDF with richer benchmark metadata
-- `--style disa`: DISA-style layout for environments that expect STIG-oriented output
-
-Example:
-
-```bash
-cis-bench export 23598 --format xccdf --style cis
-cis-bench export 23598 --format xccdf --style disa
-```
-
-## Developer Quick Start
-
-```bash
-# Clone and enter repo
-git clone https://github.com/mitre/cis-bench.git
+git clone <this-fork-url>
 cd cis-bench
-
-# Install dev dependencies
 pip install -e ".[dev]"
-# or
-uv sync --dev
-
-# Run tests
 python -m pytest
-
-# Run lint
 python -m ruff check .
 ```
 
-### Useful project paths
+Useful paths:
 
-- `src/cis_bench/cli/`: CLI entrypoints and command handlers
-- `src/cis_bench/catalog/`: catalog scraping and database logic
-- `src/cis_bench/fetcher/`: WorkBench auth and scraping
+- `src/cis_bench/cli/commands/`: CLI command handlers
+- `src/cis_bench/gpt_bundle.py`: latest-download and Custom GPT deliverable workflow
+- `src/cis_bench/gpt_knowledge.py`: Markdown knowledge packaging logic
+- `src/cis_bench/fetcher/`: CIS WorkBench authentication and scraping
 - `src/cis_bench/exporters/`: JSON, YAML, CSV, Markdown, and XCCDF exporters
-- `tests/`: unit, integration, and script tests
-- `docs/`: MkDocs documentation source
+- `tests/`: unit, integration, e2e, regression, and script tests
 
-### Developer notes
+## Upstream Attribution
 
-- Python requirement is `3.12+`
-- the packaged CLI entrypoint is `cis-bench`
-- tests are driven by `pytest`
-- linting is driven by `ruff`
-- script tests under `tests/scripts/` are not part of default pytest discovery
+This repository is a fork of MITRE SAF Team's `cis-bench` project:
 
-## Documentation
+- Upstream repository: [https://github.com/mitre/cis-bench](https://github.com/mitre/cis-bench)
+- Upstream documentation: [https://mitre.github.io/cis-bench/](https://mitre.github.io/cis-bench/)
 
-Full docs site:
+The upstream project provides the core CIS WorkBench CLI, scraper, catalog, cache, exporter, and XCCDF foundations. This fork adds workflow automation for latest-benchmark bulk download, completeness validation, retry handling, and Custom GPT knowledge packaging.
 
-- [https://mitre.github.io/cis-bench/](https://mitre.github.io/cis-bench/)
-
-Useful starting points:
-
-- [Getting Started](https://mitre.github.io/cis-bench/getting-started/)
-- [Commands Reference](https://mitre.github.io/cis-bench/user-guide/commands-reference/)
-- [Catalog Guide](https://mitre.github.io/cis-bench/user-guide/catalog-guide/)
-- [XCCDF Guide](https://mitre.github.io/cis-bench/user-guide/xccdf-guide/)
-- [Troubleshooting](https://mitre.github.io/cis-bench/user-guide/troubleshooting/)
-- [Architecture Overview](https://mitre.github.io/cis-bench/developer-guide/architecture/)
-- [Contributing Guide](https://mitre.github.io/cis-bench/developer-guide/contributing/)
-- [Testing Guide](https://mitre.github.io/cis-bench/developer-guide/testing/)
-
-## Why this README changed
-
-This top-level README is intentionally optimized for:
-
-- fast onboarding
-- accurate command examples
-- clear cache and download behavior
-- a short developer handoff for contributors and coding agents
-
-Deeper detail belongs in `docs/` and command-specific help output.
+CIS Benchmarks and CIS WorkBench are provided by the Center for Internet Security. This project does not replace CIS licensing, access requirements, or official benchmark distribution terms.
 
 ## License
 

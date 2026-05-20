@@ -61,12 +61,23 @@ def cli(ctx, verbose, debug, quiet):
 
 
 # Import and register commands
-from cis_bench.cli.commands import auth, catalog, download, export, get, info, list_cmd, search
+from cis_bench.cli.commands import (
+    auth,
+    catalog,
+    download,
+    export,
+    get,
+    gpt_bundle,
+    info,
+    list_cmd,
+    search,
+)
 
 cli.add_command(auth.auth)
 cli.add_command(download.download)
 cli.add_command(export.export_cmd)
 cli.add_command(get.get_cmd)
+cli.add_command(gpt_bundle.gpt_bundle)
 cli.add_command(list_cmd.list_benchmarks)
 cli.add_command(info.info)
 cli.add_command(search.search_cmd)

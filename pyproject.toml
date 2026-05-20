@@ -215,8 +215,3 @@ skips = [
     "B603",  # Skip subprocess without shell (we use hardcoded commands)
     "B607",  # Skip partial executable path (xmllint is in PATH)
 ]
-
-[dependency-groups]
-dev = [
-    "libcst>=1.8.6",
-]

@@ -136,6 +136,7 @@ navtree.json
 /benchmark_*.md
 /all-benchmarks/
 /gpt-knowledge/
+/CIS Benchmarks */
 /tmp-gpt-knowledge-smoke/
 /speed-test/
 

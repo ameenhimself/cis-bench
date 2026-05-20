@@ -9,7 +9,7 @@ Professional pytest configuration following best practices:
 NO HARDCODED PATHS in tests - everything via fixtures.
 
 Test organization:
-- tests/scripts/ - Project utility tests (optional, requires libcst)
+- tests/scripts/ - Project utility tests
   Run with: uv run pytest tests/scripts/
 - All other tests - cis-bench package tests (default)
   Run with: uv run pytest
