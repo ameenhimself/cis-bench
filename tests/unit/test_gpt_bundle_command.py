@@ -15,6 +15,9 @@ def test_gpt_bundle_command_is_registered():
     assert "Download latest CIS Benchmarks and package them for Custom GPT knowledge" in result.output
     assert "--benchmarks" in result.output
     assert "--workers" in result.output
+    assert "--catalog-refresh" in result.output
+    assert "--max-tokens" in result.output
+    assert "--max-files" in result.output
 
 
 def test_gpt_bundle_command_invokes_workflow_with_defaults(tmp_path):
@@ -41,6 +44,8 @@ def test_gpt_bundle_command_invokes_workflow_with_defaults(tmp_path):
                 "--max-retries",
                 "3",
                 "--overwrite",
+                "--catalog-refresh",
+                "never",
             ],
         )
 
@@ -52,4 +57,6 @@ def test_gpt_bundle_command_invokes_workflow_with_defaults(tmp_path):
     assert options.benchmarks == 2
     assert options.max_retries == 3
     assert options.overwrite is True
+    assert options.catalog_refresh == "never"
+    assert options.single_file is None
     assert "Completed 2 benchmark(s)" in result.output

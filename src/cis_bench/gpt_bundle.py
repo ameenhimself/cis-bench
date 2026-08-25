@@ -2,23 +2,28 @@
 
 from __future__ import annotations
 
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import dataclass, field
-from datetime import datetime
+import hashlib
 import json
-from pathlib import Path
 import shutil
-import tempfile
 import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Callable, Iterable
 
 from rich.console import Console
-from rich.progress import track
 
 from cis_bench.catalog.database import CatalogDatabase
 from cis_bench.config import Config
-from cis_bench.gpt_knowledge import PackageStats, package_downloads, validate_benchmark
+from cis_bench.gpt_knowledge import (
+    DEFAULT_MAX_FILES,
+    DEFAULT_MAX_TOKENS,
+    PackageStats,
+    package_downloads,
+    validate_benchmark,
+)
 from cis_bench.models.benchmark import Benchmark
 
 console = Console()
@@ -26,6 +31,11 @@ console = Console()
 CatalogResolver = Callable[[], list[dict]]
 Downloader = Callable[[Iterable[str], Path], None]
 Packager = Callable[..., PackageStats]
+CatalogRefresher = Callable[[str], dict]
+
+BUNDLE_MARKER = ".cis-bench-bundle.json"
+STAGING_MARKER = ".cis-bench-staging.json"
+PARTIAL_SUFFIX = ".partial"
 
 
 @dataclass
@@ -35,13 +45,16 @@ class BundleOptions:
     output_dir: Path = field(default_factory=lambda: default_deliverable_dir())
     staging_dir: Path | None = None
     raw_dir_name: str = "Raw Files"
-    max_retries: int = 2
+    max_retries: int = 5
     workers: int = 4
     benchmarks: int = 2
     overwrite: bool = False
     keep_temp: bool = False
-    max_chars: int = 1_200_000
-    single_file: bool = True
+    max_chars: int | None = None
+    max_tokens: int = DEFAULT_MAX_TOKENS
+    max_files: int = DEFAULT_MAX_FILES
+    single_file: bool | None = None
+    catalog_refresh: str = "auto"
 
 
 @dataclass
@@ -80,17 +93,113 @@ def default_deliverable_dir(now: datetime | None = None) -> Path:
     return Path(f"CIS Benchmarks {now.strftime('%d%m%y')}")
 
 
+def _catalog_timestamp(db: CatalogDatabase) -> datetime | None:
+    try:
+        value = db.get_metadata("last_full_scrape")
+    except Exception:
+        return None
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def refresh_catalog_if_needed(mode: str, now: datetime | None = None) -> dict:
+    """Refresh missing or stale catalog and return freshness metadata."""
+    if mode not in {"auto", "always", "never"}:
+        raise ValueError(f"Unsupported catalog refresh mode: {mode}")
+
+    now = now or datetime.now(UTC)
+    db_path = Config.get_catalog_db_path()
+    db_exists = db_path.exists()
+    if mode == "never" and not db_exists:
+        raise RuntimeError("Catalog database not found and catalog refresh is disabled.")
+    if not db_exists:
+        Config.ensure_directories()
+    db = CatalogDatabase(db_path)
+    timestamp = _catalog_timestamp(db) if db_exists else None
+    stale = timestamp is None or now - timestamp > timedelta(hours=24)
+    refresh = mode == "always" or (mode == "auto" and stale)
+
+    if not refresh:
+        return {
+            "catalog_refreshed": False,
+            "catalog_timestamp": timestamp.isoformat() if timestamp else None,
+        }
+
+    from cis_bench.catalog.scraper import CatalogScraper
+    from cis_bench.fetcher.auth import AuthManager
+
+    Config.ensure_directories()
+    db.initialize_schema()
+    session = AuthManager.get_or_create_session(verify_ssl=Config.get_verify_ssl())
+    if not AuthManager.validate_session(session, verify_ssl=Config.get_verify_ssl()):
+        raise RuntimeError("Saved CIS WorkBench session is invalid. Run 'cis-bench auth login'.")
+
+    stats = CatalogScraper(db, session).scrape_full_catalog(rate_limit_seconds=2.0)
+    if stats.get("failed_pages"):
+        raise RuntimeError(
+            "Catalog refresh incomplete; failed pages: "
+            + ", ".join(str(page) for page in stats["failed_pages"])
+        )
+    timestamp = _catalog_timestamp(db)
+    return {
+        "catalog_refreshed": True,
+        "catalog_timestamp": timestamp.isoformat() if timestamp else None,
+        "catalog_benchmarks": stats.get("total_benchmarks"),
+    }
+
+
 def _sort_id(value: str) -> tuple[int, str]:
     return (int(value), value) if str(value).isdigit() else (10**12, str(value))
 
 
-def _safe_reset_dir(path: Path) -> None:
-    """Remove an existing output directory after basic safety checks."""
+def _assert_narrow_path(path: Path) -> Path:
+    """Reject roots, home, current workspace, and application data root."""
     resolved = path.resolve()
-    if resolved.parent == resolved or str(resolved) in {resolved.anchor, ""}:
-        raise ValueError(f"Refusing to overwrite unsafe path: {path}")
-    if path.exists():
-        shutil.rmtree(path)
+    forbidden = {
+        Path.cwd().resolve(),
+        Path.home().resolve(),
+        Config.get_data_dir().resolve(),
+        Path(resolved.anchor).resolve(),
+    }
+    if resolved.parent == resolved or resolved in forbidden:
+        raise ValueError(f"Refusing unsafe directory path: {path}")
+    return resolved
+
+
+def _is_legacy_bundle(path: Path) -> bool:
+    return (
+        (path / "manifest.json").is_file()
+        and (path / "RECEIPT.md").is_file()
+        and (path / "Raw Files").is_dir()
+    )
+
+
+def _reset_owned_dir(path: Path, marker: str, *, allow_legacy_bundle: bool = False) -> None:
+    """Remove only a directory proven to belong to this workflow."""
+    _assert_narrow_path(path)
+    if not path.exists():
+        return
+    owned = (path / marker).is_file()
+    if allow_legacy_bundle:
+        owned = owned or _is_legacy_bundle(path)
+    if not owned:
+        raise ValueError(f"Refusing to remove unrecognized directory: {path}")
+    shutil.rmtree(path)
+
+
+def _write_marker(path: Path, marker: str, payload: dict) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / marker).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _default_staging_dir(output_dir: Path) -> Path:
+    digest = hashlib.sha256(str(output_dir.resolve()).encode()).hexdigest()[:12]
+    return Config.get_data_dir() / "gpt-bundle-staging" / f"{output_dir.name}-{digest}"
 
 
 def resolve_latest_catalog_entries() -> list[dict]:
@@ -136,6 +245,7 @@ def _raw_validation_error(data: dict) -> str | None:
 def validate_staged_downloads(input_dir: Path, expected_ids: set[str]) -> ValidationReport:
     """Validate raw downloaded benchmark files and identify retry candidates."""
     complete_files: dict[str, Path] = {}
+    complete_downloaded_at: dict[str, str] = {}
     incomplete_ids: set[str] = set()
     issues: dict[str, str] = {}
 
@@ -173,7 +283,23 @@ def validate_staged_downloads(input_dir: Path, expected_ids: set[str]) -> Valida
             incomplete_ids.add(benchmark_id)
             continue
 
+        if benchmark_id in complete_files:
+            previous = complete_files[benchmark_id]
+            issues[path.name] = (
+                f"duplicate benchmark_id {benchmark_id}; selected newest complete file"
+            )
+            previous_time = complete_downloaded_at[benchmark_id]
+            current_time = benchmark.downloaded_at.isoformat()
+            if current_time > previous_time:
+                issues[previous.name] = (
+                    f"duplicate benchmark_id {benchmark_id}; superseded by {path.name}"
+                )
+                complete_files[benchmark_id] = path
+                complete_downloaded_at[benchmark_id] = current_time
+            continue
+
         complete_files[benchmark_id] = path
+        complete_downloaded_at[benchmark_id] = benchmark.downloaded_at.isoformat()
         incomplete_ids.discard(benchmark_id)
 
     missing_ids = sorted(expected_ids - set(complete_files) - incomplete_ids, key=_sort_id)
@@ -287,7 +413,7 @@ def _publish_raw_files(report: ValidationReport, raw_dir: Path) -> None:
         target = raw_dir / source.name
         if target.exists():
             target.unlink()
-        shutil.move(str(source), target)
+        shutil.copy2(source, target)
 
 
 def _write_receipt(
@@ -297,10 +423,10 @@ def _write_receipt(
     retry_count: int,
     package_stats: PackageStats,
     validation_report: ValidationReport,
+    catalog_metadata: dict,
 ) -> Path:
     receipt_path = output_dir / "RECEIPT.md"
-    bundle_names = sorted(path.name for path in output_dir.glob("all-benchmarks-*.md"))
-    upload_target = bundle_names[0] if bundle_names else "the generated Markdown knowledge file"
+    bundle_names = [bundle["filename"] for bundle in package_stats.bundles]
     lines = [
         "# CIS Benchmarks Custom GPT Receipt",
         "",
@@ -308,10 +434,15 @@ def _write_receipt(
         f"Latest benchmarks verified: {latest_count}",
         f"Raw files: {len(list(raw_dir.glob('*.json')))} in `{raw_dir.name}`",
         f"Knowledge bundles: {package_stats.bundle_files}",
+        f"Catalog timestamp: {catalog_metadata.get('catalog_timestamp') or 'unknown'}",
         f"Download retry passes used: {retry_count}",
         f"Skipped or invalid files during packaging: {package_stats.skipped_files}",
         "",
-        f"Next step: upload `{upload_target}` to the Custom GPT knowledge section.",
+        "Next step: upload every `cis-benchmarks-knowledge-*.md` file to Custom GPT Knowledge,",
+        "then paste `CUSTOM_GPT_INSTRUCTIONS.md` into Custom GPT Instructions.",
+        "",
+        "Knowledge files:",
+        *[f"- `{name}`" for name in bundle_names],
         "",
         "Credits: CIS Benchmarks and CIS WorkBench provide the benchmark source material; "
         "this fork builds on MITRE SAF Team's `cis-bench` project under Apache 2.0; "
@@ -332,92 +463,165 @@ def run_gpt_bundle(
     catalog_resolver: CatalogResolver = resolve_latest_catalog_entries,
     downloader=download_benchmark_ids,
     packager=package_downloads,
+    catalog_refresher: CatalogRefresher = refresh_catalog_if_needed,
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> BundleResult:
     """Run the latest-download, validate, publish, and GPT-package workflow."""
     output_dir = Path(options.output_dir)
+    _assert_narrow_path(output_dir)
     if output_dir.exists():
         if not options.overwrite:
             raise FileExistsError(
                 f"Output directory already exists: {output_dir}. Use --overwrite to replace it."
             )
+        if not (output_dir / BUNDLE_MARKER).is_file() and not _is_legacy_bundle(output_dir):
+            raise ValueError(f"Refusing to overwrite unrecognized directory: {output_dir}")
 
+    console.print("[cyan]Resolving catalog freshness...[/cyan]")
+    catalog_metadata = catalog_refresher(options.catalog_refresh)
     rows = catalog_resolver()
     latest_ids = sorted({str(row["benchmark_id"]) for row in rows}, key=_sort_id)
     if not latest_ids:
         raise RuntimeError("No latest published benchmarks found in the local catalog.")
 
-    if output_dir.exists() and options.overwrite:
-        _safe_reset_dir(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    staging_dir = (
+        Path(options.staging_dir)
+        if options.staging_dir is not None
+        else _default_staging_dir(output_dir)
+    )
+    _assert_narrow_path(staging_dir)
+    if staging_dir.exists() and not (staging_dir / STAGING_MARKER).is_file():
+        if any(staging_dir.iterdir()):
+            raise ValueError(f"Refusing unrecognized staging directory: {staging_dir}")
+    _write_marker(
+        staging_dir,
+        STAGING_MARKER,
+        {
+            "output_dir": str(output_dir.resolve()),
+            "expected_ids": latest_ids,
+            "catalog_timestamp": catalog_metadata.get("catalog_timestamp"),
+            "state": "downloading",
+        },
+    )
 
-    def run_with_staging(staging_dir: Path) -> BundleResult:
-        staging_dir.mkdir(parents=True, exist_ok=True)
-        queue = latest_ids
-        retry_count = 0
-        validation_report = ValidationReport({}, latest_ids, [], {})
-
-        for attempt in range(options.max_retries + 1):
-            console.print(
-                f"[cyan]Downloading pass {attempt + 1}:[/cyan] {len(queue)} benchmark(s)"
+    console.print("[cyan]Validating staged files...[/cyan]")
+    validation_report = validate_staged_downloads(staging_dir, set(latest_ids))
+    queue = validation_report.retry_ids
+    retry_count = 0
+    pass_number = 0
+    retry_history: list[dict] = []
+    while queue:
+        if pass_number > options.max_retries:
+            raise RuntimeError(
+                "Incomplete downloads remain after retry limit: " + ", ".join(queue)
             )
-            downloader(
-                queue,
-                staging_dir,
-                workers=options.workers,
-                benchmarks=options.benchmarks,
-                force=True,
+        console.print(
+            f"[cyan]Downloading pass {pass_number + 1}:[/cyan] {len(queue)} benchmark(s)"
+        )
+        queued_ids = list(queue)
+        downloader(
+            queue,
+            staging_dir,
+            workers=options.workers,
+            benchmarks=options.benchmarks,
+            force=True,
+        )
+        console.print("[cyan]Validating staged files...[/cyan]")
+        validation_report = validate_staged_downloads(staging_dir, set(latest_ids))
+        queue = validation_report.retry_ids
+        retry_history.append(
+            {
+                "pass": pass_number + 1,
+                "queued_ids": queued_ids,
+                "remaining_ids": list(queue),
+            }
+        )
+        if not queue:
+            break
+        if pass_number >= options.max_retries:
+            raise RuntimeError(
+                "Incomplete downloads remain after retry limit: " + ", ".join(queue)
             )
-
-            validation_report = validate_staged_downloads(staging_dir, set(latest_ids))
-            if validation_report.is_complete:
-                break
-
-            queue = validation_report.retry_ids
-            if attempt >= options.max_retries:
-                raise RuntimeError(
-                    "Incomplete downloads remain after retry limit: " + ", ".join(queue)
-                )
-            retry_count += 1
-            console.print(f"[yellow]Retrying {len(queue)} incomplete benchmark(s).[/yellow]")
-
-        raw_dir = output_dir / options.raw_dir_name
-        for _ in track([1], description="Publishing raw files"):
-            _publish_raw_files(validation_report, raw_dir)
-
-        package_stats = packager(
-            raw_dir,
-            output_dir,
-            max_chars=options.max_chars,
-            single_file=options.single_file,
+        retry_count += 1
+        delay = min(30, 2 ** (retry_count + 1))
+        console.print(
+            f"[yellow]Retrying {len(queue)} incomplete benchmark(s) after {delay}s.[/yellow]"
         )
-        receipt_path = _write_receipt(
-            output_dir,
-            raw_dir,
-            len(latest_ids),
-            retry_count,
-            package_stats,
-            validation_report,
-        )
-        return BundleResult(
-            output_dir=output_dir,
-            raw_dir=raw_dir,
-            completed_count=len(validation_report.complete_files),
-            retry_count=retry_count,
-            bundle_files=package_stats.bundle_files,
-            receipt_path=receipt_path,
-        )
+        sleeper(delay)
+        pass_number += 1
 
-    if options.staging_dir is not None:
-        staging_path = Path(options.staging_dir)
-        if staging_path.exists() and options.overwrite:
-            _safe_reset_dir(staging_path)
-        return run_with_staging(staging_path)
+    partial_dir = output_dir.with_name(output_dir.name + PARTIAL_SUFFIX)
+    _assert_narrow_path(partial_dir)
+    if partial_dir.exists():
+        _reset_owned_dir(partial_dir, BUNDLE_MARKER)
+    _write_marker(
+        partial_dir,
+        BUNDLE_MARKER,
+        {"state": "building", "output_dir": str(output_dir.resolve())},
+    )
 
-    with tempfile.TemporaryDirectory(prefix="cis-bench-gpt-") as temp_dir:
-        result = run_with_staging(Path(temp_dir))
-        if options.keep_temp:
-            keep_path = output_dir / "_staging"
-            if keep_path.exists():
-                _safe_reset_dir(keep_path)
-            shutil.copytree(temp_dir, keep_path)
-        return result
+    raw_dir = partial_dir / options.raw_dir_name
+    console.print("[cyan]Publishing verified raw files...[/cyan]")
+    _publish_raw_files(validation_report, raw_dir)
+    manifest_context = {
+        **catalog_metadata,
+        "expected_benchmarks": len(latest_ids),
+        "verified_benchmarks": len(validation_report.complete_files),
+        "validation_complete": validation_report.is_complete,
+        "download_retry_passes": retry_count,
+        "download_history": retry_history,
+    }
+    console.print("[cyan]Rendering Custom GPT knowledge...[/cyan]")
+    package_stats = packager(
+        raw_dir,
+        partial_dir,
+        max_chars=options.max_chars,
+        single_file=options.single_file,
+        max_tokens=options.max_tokens,
+        max_files=options.max_files,
+        manifest_context=manifest_context,
+    )
+    receipt_path = _write_receipt(
+        partial_dir,
+        raw_dir,
+        len(latest_ids),
+        retry_count,
+        package_stats,
+        validation_report,
+        catalog_metadata,
+    )
+    _write_marker(
+        partial_dir,
+        BUNDLE_MARKER,
+        {
+            "state": "complete",
+            "generated_at": datetime.now(UTC).isoformat(),
+            "verified_benchmarks": len(validation_report.complete_files),
+        },
+    )
+
+    backup_dir = output_dir.with_name(output_dir.name + ".backup")
+    if backup_dir.exists():
+        _reset_owned_dir(backup_dir, BUNDLE_MARKER, allow_legacy_bundle=True)
+    try:
+        if output_dir.exists():
+            output_dir.rename(backup_dir)
+        partial_dir.rename(output_dir)
+    except Exception:
+        if backup_dir.exists() and not output_dir.exists():
+            backup_dir.rename(output_dir)
+        raise
+    if backup_dir.exists():
+        _reset_owned_dir(backup_dir, BUNDLE_MARKER, allow_legacy_bundle=True)
+
+    if not options.keep_temp:
+        _reset_owned_dir(staging_dir, STAGING_MARKER)
+
+    return BundleResult(
+        output_dir=output_dir,
+        raw_dir=output_dir / options.raw_dir_name,
+        completed_count=len(validation_report.complete_files),
+        retry_count=retry_count,
+        bundle_files=package_stats.bundle_files,
+        receipt_path=output_dir / receipt_path.name,
+    )

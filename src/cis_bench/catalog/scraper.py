@@ -67,6 +67,7 @@ class CatalogScraper:
             )
             total_pages = 70  # Conservative estimate - will stop when no more results
 
+        limited_scrape = max_pages is not None
         if max_pages:
             total_pages = min(total_pages, max_pages)
 
@@ -78,6 +79,7 @@ class CatalogScraper:
 
         total_benchmarks = len(first_page_benchmarks)
         failed_pages = []
+        seen_benchmark_ids = {str(bench["benchmark_id"]) for bench in first_page_benchmarks}
 
         # Progress bar with additional info
         with Progress(
@@ -117,6 +119,7 @@ class CatalogScraper:
                                 # Save to database
                                 for bench in benchmarks:
                                     self.db.insert_benchmark(bench)
+                                    seen_benchmark_ids.add(str(bench["benchmark_id"]))
 
                                 total_benchmarks += len(benchmarks)
                                 logger.debug(f"Page {page_num}: {len(benchmarks)} benchmarks")
@@ -151,13 +154,18 @@ class CatalogScraper:
                 if batch_start + batch_size < len(remaining_pages):
                     time.sleep(rate_limit_seconds)
 
-        # Mark latest versions
-        self.db.mark_latest_versions()
+        # Reconcile stale rows only after a complete snapshot.
+        complete_snapshot = not failed_pages and not limited_scrape
+        if complete_snapshot:
+            self.db.mark_latest_versions(seen_benchmark_ids)
+        else:
+            self.db.mark_latest_versions()
 
         # Save metadata
         from datetime import UTC, datetime
 
-        self.db.set_metadata("last_full_scrape", datetime.now(UTC).isoformat())
+        metadata_key = "last_full_scrape" if complete_snapshot else "last_partial_scrape"
+        self.db.set_metadata(metadata_key, datetime.now(UTC).isoformat())
         self.db.set_metadata("total_pages_scraped", str(total_pages))
 
         stats = {
@@ -209,6 +217,8 @@ class CatalogScraper:
                 self.db.insert_benchmark(bench)
                 updated_count += 1
                 logger.debug(f"Updated: {bench['benchmark_id']}")
+
+        self.db.mark_latest_versions()
 
         # Update metadata
         from datetime import UTC, datetime

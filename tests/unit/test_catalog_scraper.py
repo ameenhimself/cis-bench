@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from cis_bench.catalog.database import CatalogDatabase
+from cis_bench.catalog.parser import WorkBenchCatalogParser
 from cis_bench.catalog.scraper import CatalogScraper
 
 
@@ -177,8 +178,31 @@ class TestFullCatalogScrape:
         scraper.scrape_full_catalog(max_pages=1, rate_limit_seconds=0)
 
         # Check metadata was saved
-        last_scrape = temp_db.get_metadata("last_full_scrape")
+        last_scrape = temp_db.get_metadata("last_partial_scrape")
         assert last_scrape is not None
+
+    def test_complete_scrape_marks_unseen_catalog_rows_not_latest(
+        self, temp_db, mock_session, monkeypatch
+    ):
+        temp_db.insert_benchmark(
+            {
+                "benchmark_id": "stale-id",
+                "title": "CIS Removed Product Benchmark",
+                "version": "v1.0.0",
+                "url": "https://workbench.cisecurity.org/benchmarks/stale-id",
+                "status": "Published",
+                "is_latest": True,
+            }
+        )
+
+        monkeypatch.setattr(
+            WorkBenchCatalogParser,
+            "extract_pagination_info",
+            staticmethod(lambda _html: {"total_pages": 1}),
+        )
+        CatalogScraper(temp_db, mock_session).scrape_full_catalog(rate_limit_seconds=0)
+
+        assert temp_db.get_benchmark("stale-id")["is_latest"] is False
 
 
 class TestQuickUpdate:
@@ -242,3 +266,5 @@ class TestErrorHandling:
         assert "failed_pages" in stats
         # At least page 1 should have succeeded
         assert stats["total_benchmarks"] > 0
+        assert temp_db.get_metadata("last_full_scrape") is None
+        assert temp_db.get_metadata("last_partial_scrape") is not None

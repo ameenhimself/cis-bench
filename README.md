@@ -1,156 +1,121 @@
 # CIS Benchmark GPT Bundle Toolkit
 
-> Bulk-download the latest CIS Benchmarks and package them into source-faithful Markdown for Custom GPT knowledge.
+> Download the latest published CIS Benchmarks, verify completeness, and package them as source-faithful Custom GPT knowledge files.
 
 [![Python Version](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-## Purpose
-
-This fork is optimized for one practical workflow: pull the latest CIS Benchmark content from CIS WorkBench, verify that downloaded benchmarks are complete, and convert the raw benchmark JSON into a Custom GPT-friendly Markdown knowledge file.
-
-The generated GPT knowledge keeps the original CIS recommendation substance intact, especially:
-
-- Description
-- Rationale
-- Audit
-- Remediation
-- Default Value
-- References
-
-It adds only light deterministic summaries and structure so a Custom GPT can retrieve, summarize, and cite the benchmark evidence more reliably.
-
 ## Recommended Workflow
 
 Authenticate once:
 
-```bash
+```powershell
 python -m cis_bench auth login --browser edge
 ```
 
-If browser cookie extraction does not work on Windows, use the login command's cookie-file import support.
+Create a complete Custom GPT deliverable:
 
-Refresh the local catalog metadata:
-
-```bash
-python -m cis_bench catalog refresh
+```powershell
+python -m cis_bench gpt-bundle
 ```
 
-Create the full Custom GPT deliverable:
+The command refreshes a missing or stale catalog, resolves the latest published version of every benchmark, resumes verified staged downloads, retries incomplete files, and writes upload-safe knowledge files.
 
-```bash
-python -m cis_bench gpt-bundle --benchmarks 2 --workers 4
+Default parallelism is conservative. Increase it only while CIS WorkBench remains responsive:
+
+```powershell
+python -m cis_bench gpt-bundle --benchmarks 4 --workers 6
 ```
 
-By default, this creates a dated folder such as:
+`--benchmarks` controls concurrent benchmark documents. `--workers` controls recommendation requests inside each benchmark. Their product approximates active request concurrency.
+
+## Generated Deliverable
+
+A run on 25 August 2026 creates:
 
 ```text
-CIS Benchmarks 200526/
+CIS Benchmarks 250826/
   Raw Files/
-    <raw benchmark JSON files>
-  all-benchmarks-01.md
+    <verified benchmark JSON files>
+  cis-benchmarks-knowledge-01-of-N.md
+  cis-benchmarks-knowledge-02-of-N.md
+  CUSTOM_GPT_INSTRUCTIONS.md
   README.md
   manifest.json
   RECEIPT.md
 ```
 
-Upload `all-benchmarks-01.md` to the Custom GPT knowledge section. Keep `Raw Files` as the verified source archive.
+Upload every `cis-benchmarks-knowledge-*.md` file to Custom GPT Knowledge. Paste the contents of `CUSTOM_GPT_INSTRUCTIONS.md` into the GPT Instructions field. Keep `Raw Files` as the verified source archive.
 
-## What `gpt-bundle` Does
+Knowledge files preserve each recommendation's Description, Rationale, Audit, Remediation, Default Value, and References. Generated summaries are intentionally omitted because they duplicate source text. Profiles and CIS, NIST, and MITRE mappings remain in compact metadata.
 
-`gpt-bundle` is the safest path for bulk download and GPT packaging:
+Packaging defaults to at most 1,800,000 tokens per file and 20 files. This stays below OpenAI's documented [2 million token limit per text file](https://help.openai.com/en/articles/8555545-file-uploads-faq) and [20-file Custom GPT knowledge limit](https://help.openai.com/en/articles/8554397-creating-with-chatgpt). Use `--single-file` only for smaller collections; the command rejects a single file that exceeds upload limits instead of writing an unusable artifact.
 
-- selects only benchmarks marked latest in the local catalog
-- downloads into a staging folder first
-- validates JSON/model parsing and recommendation counts
-- retries missing or incomplete benchmarks
-- moves verified raw files into `Raw Files`
-- generates a source-faithful Markdown knowledge bundle
-- writes a short receipt with counts, next steps, and credits
+## Reliability And Recovery
 
-Use `--overwrite` if the dated output folder already exists:
+`gpt-bundle` stores working downloads under the CIS Bench application-data directory. If a run stops, rerun the same command. Existing staged JSON is validated first, and only missing or incomplete benchmark IDs are queued.
 
-```bash
-python -m cis_bench gpt-bundle --overwrite --benchmarks 2 --workers 4
+Catalog behavior:
+
+```powershell
+python -m cis_bench gpt-bundle --catalog-refresh auto
+python -m cis_bench gpt-bundle --catalog-refresh always
+python -m cis_bench gpt-bundle --catalog-refresh never
 ```
 
-## Speed Tuning
+`auto` is the default and performs a full refresh when the catalog is missing or older than 24 hours. A partial catalog refresh is never accepted as current.
 
-There are two layers of parallelism:
+Existing dated output is protected. `--overwrite` replaces only a directory recognized as a prior CIS bundle:
 
-- `--benchmarks`: how many benchmark documents download at the same time
-- `--workers`: how many recommendation pages are fetched in parallel inside each benchmark
-
-Start conservatively:
-
-```bash
-python -m cis_bench gpt-bundle --benchmarks 2 --workers 4
+```powershell
+python -m cis_bench gpt-bundle --overwrite
 ```
 
-If CIS WorkBench remains responsive, try:
+The replacement is built in a partial directory and published only after download validation and knowledge packaging succeed.
 
-```bash
-python -m cis_bench gpt-bundle --benchmarks 4 --workers 6
+## Authentication
+
+Browser-cookie extraction can require elevated access on Windows. If extraction fails, export CIS WorkBench cookies as JSON and import them with the authentication command's cookie-file option. Check current options with:
+
+```powershell
+python -m cis_bench auth login --help
 ```
-
-Avoid extreme values unless you are prepared for throttling, timeouts, or incomplete downloads that need retrying.
 
 ## Existing CLI Capabilities
 
-This fork still keeps the general `cis-bench` CLI behavior from upstream:
+This fork retains upstream search, download, cache, and export commands:
 
-```bash
+```powershell
 python -m cis_bench catalog refresh
-python -m cis_bench search "ubuntu 22" --latest
-python -m cis_bench download 23598
+python -m cis_bench search "ubuntu 24" --latest
+python -m cis_bench download 23598 --workers 4
 python -m cis_bench export 23598 --format xccdf --style cis
-```
-
-Useful commands:
-
-```bash
-python -m cis_bench auth login
-python -m cis_bench catalog refresh
-python -m cis_bench search <query>
-python -m cis_bench download <benchmark-id>
-python -m cis_bench export <benchmark-id>
-python -m cis_bench gpt-bundle
 python -m cis_bench --help
 ```
 
-`catalog refresh` downloads search metadata only. `download` and `gpt-bundle` pull full benchmark content to your machine.
+`catalog refresh` downloads metadata. `download` and `gpt-bundle` download full recommendation content.
 
 ## Developer Setup
 
-```bash
-git clone <this-fork-url>
+```powershell
+git clone https://github.com/ameenhimself/cis-bench.git
 cd cis-bench
 pip install -e ".[dev]"
 python -m pytest
 python -m ruff check .
 ```
 
-Useful paths:
+Core workflow code lives in `src/cis_bench/gpt_bundle.py`. Knowledge rendering and token-aware packaging live in `src/cis_bench/gpt_knowledge.py`.
 
-- `src/cis_bench/cli/commands/`: CLI command handlers
-- `src/cis_bench/gpt_bundle.py`: latest-download and Custom GPT deliverable workflow
-- `src/cis_bench/gpt_knowledge.py`: Markdown knowledge packaging logic
-- `src/cis_bench/fetcher/`: CIS WorkBench authentication and scraping
-- `src/cis_bench/exporters/`: JSON, YAML, CSV, Markdown, and XCCDF exporters
-- `tests/`: unit, integration, e2e, regression, and script tests
+## Fork Notice And Attribution
 
-## Upstream Attribution
+This repository is a fork of the [MITRE SAF Team cis-bench project](https://github.com/mitre/cis-bench). Upstream provides the CIS WorkBench scraper, authentication, catalog, cache, exporter, and XCCDF foundations. This fork adds resumable latest-benchmark bulk download, completeness validation, safe publication, and Custom GPT knowledge packaging.
 
-This repository is a fork of MITRE SAF Team's `cis-bench` project:
+CIS Benchmarks and CIS WorkBench are provided by the Center for Internet Security. Users remain responsible for CIS licensing, distribution rights, and ChatGPT workspace data controls. This tool does not replace official CIS guidance.
 
-- Upstream repository: [https://github.com/mitre/cis-bench](https://github.com/mitre/cis-bench)
-- Upstream documentation: [https://mitre.github.io/cis-bench/](https://mitre.github.io/cis-bench/)
-
-The upstream project provides the core CIS WorkBench CLI, scraper, catalog, cache, exporter, and XCCDF foundations. This fork adds workflow automation for latest-benchmark bulk download, completeness validation, retry handling, and Custom GPT knowledge packaging.
-
-CIS Benchmarks and CIS WorkBench are provided by the Center for Internet Security. This project does not replace CIS licensing, access requirements, or official benchmark distribution terms.
+Key packages include Click, Rich, Requests, Beautiful Soup, Pydantic, SQLModel, and tiktoken.
 
 ## License
 
-Apache 2.0. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE).

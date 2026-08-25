@@ -11,14 +11,15 @@ in progress.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field
 from html import unescape
 from pathlib import Path
 from typing import Iterable
-import warnings
 
 from bs4 import (
     BeautifulSoup,
@@ -104,6 +105,25 @@ class PackageStats:
     bundle_files: int = 0
     benchmark_count: int = 0
     skip_reasons: dict[str, str] = field(default_factory=dict)
+    bundles: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class RenderedDocument:
+    """One benchmark or benchmark-part document ready for bundling."""
+
+    text: str
+    benchmark_id: str
+    title: str
+    version: str
+    recommendation_start: str | None
+    recommendation_end: str | None
+
+
+DEFAULT_MAX_TOKENS = 1_800_000
+DEFAULT_MAX_FILES = 20
+TOKEN_ENCODING = "o200k_base"
+_TOKENIZER = None
 
 
 def slugify(value: str) -> str:
@@ -320,53 +340,6 @@ def iter_downloaded_benchmarks(input_dir: Path) -> tuple[list[LoadedBenchmark], 
     return benchmarks, skipped
 
 
-def _strip_summary_noise(text: str) -> str:
-    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
-    cleaned_lines: list[str] = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if re.match(r"^[-*+]\s+", line):
-            line = re.sub(r"^[-*+]\s+", "", line)
-        line = re.sub(r"^\d+\.\s+", "", line)
-        line = re.sub(r"^#+\s+", "", line)
-        line = re.sub(r"^(#|\$)\s+", "", line)
-        line = line.strip("` ")
-        if line:
-            cleaned_lines.append(line)
-    return " ".join(cleaned_lines).strip()
-
-
-def first_sentence(text: str) -> str:
-    cleaned = _strip_summary_noise(text)
-    if not cleaned:
-        return ""
-
-    match = re.search(r"(.+?[.!?])(?:\s|$)", cleaned)
-    if match:
-        return match.group(1).strip()
-    return cleaned.splitlines()[0].strip()
-
-
-def build_summary(description: str, rationale: str, remediation: str, audit: str) -> list[str]:
-    summary_lines: list[str] = []
-
-    purpose = first_sentence(description)
-    if purpose:
-        summary_lines.append(f"- Purpose: {purpose}")
-
-    why = first_sentence(rationale)
-    if why:
-        summary_lines.append(f"- Why it matters: {why}")
-
-    what_to_do = first_sentence(remediation) or first_sentence(audit)
-    if what_to_do:
-        summary_lines.append(f"- What to do: {what_to_do}")
-
-    return summary_lines
-
-
 def render_recommendation(rec: Recommendation) -> str:
     description = html_to_markdown(rec.description)
     rationale = html_to_markdown(rec.rationale)
@@ -377,19 +350,16 @@ def render_recommendation(rec: Recommendation) -> str:
 
     sections: list[str] = [f"### {rec.ref} {rec.title}"]
 
-    summary_lines = build_summary(description, rationale, remediation, audit)
-    if summary_lines:
-        sections.append("Summary:\n" + "\n".join(summary_lines))
-
-    sections.append(f"Assessment: {rec.assessment_status}")
-
+    metadata = [f"Assessment: {rec.assessment_status}"]
     if rec.profiles:
-        sections.append(f"Profiles: {', '.join(rec.profiles)}")
-    if rec.nist_controls:
-        sections.append(f"NIST Controls: {', '.join(rec.nist_controls)}")
+        metadata.append(f"Profiles: {', '.join(rec.profiles)}")
+
+    mappings: list[str] = []
     if rec.cis_controls:
         controls = ", ".join(f"v{c.version} {c.control} {c.title}" for c in rec.cis_controls)
-        sections.append(f"CIS Controls: {controls}")
+        mappings.append(f"CIS: {controls}")
+    if rec.nist_controls:
+        mappings.append(f"NIST: {', '.join(rec.nist_controls)}")
     if rec.mitre_mapping:
         mitre_parts = []
         if rec.mitre_mapping.techniques:
@@ -399,7 +369,10 @@ def render_recommendation(rec: Recommendation) -> str:
         if rec.mitre_mapping.mitigations:
             mitre_parts.append(f"Mitigations: {', '.join(rec.mitre_mapping.mitigations)}")
         if mitre_parts:
-            sections.append("MITRE: " + " | ".join(mitre_parts))
+            mappings.append("MITRE: " + ", ".join(mitre_parts))
+    if mappings:
+        metadata.append("Mappings: " + " | ".join(mappings))
+    sections.append("\n".join(metadata))
 
     field_map = [
         ("Description", description),
@@ -416,46 +389,217 @@ def render_recommendation(rec: Recommendation) -> str:
     return "\n\n".join(sections)
 
 
-def render_benchmark(benchmark: Benchmark) -> str:
-    header = [
+def _get_tokenizer():
+    global _TOKENIZER
+    if _TOKENIZER is None:
+        try:
+            import tiktoken
+        except ImportError as exc:
+            raise RuntimeError(
+                "Token-aware packaging requires tiktoken. Reinstall cis-bench dependencies."
+            ) from exc
+        _TOKENIZER = tiktoken.get_encoding(TOKEN_ENCODING)
+    return _TOKENIZER
+
+
+def count_tokens(value: str) -> int:
+    """Count tokens using tokenizer used by current OpenAI model families."""
+    return len(_get_tokenizer().encode(value, disallowed_special=()))
+
+
+def _within_limits(
+    token_count: int,
+    char_count: int,
+    *,
+    max_tokens: int,
+    max_chars: int | None,
+) -> bool:
+    return token_count <= max_tokens and (max_chars is None or char_count <= max_chars)
+
+
+def _benchmark_header(benchmark: Benchmark, part: tuple[int, int] | None = None) -> str:
+    lines = [
         f"## {benchmark.title}",
         f"Benchmark ID: {benchmark.benchmark_id}",
         f"Version: {benchmark.version}",
         f"Source: {benchmark.url}",
         f"Recommendations Included: {benchmark.total_recommendations}",
     ]
+    if part is not None:
+        lines.append(f"Benchmark Part: {part[0]} of {part[1]}")
+    return "\n".join(lines)
+
+
+def render_benchmark(benchmark: Benchmark) -> str:
     recommendations = "\n\n".join(render_recommendation(rec) for rec in benchmark.recommendations)
-    return "\n".join(header) + "\n\n" + recommendations.strip() + "\n"
+    return _benchmark_header(benchmark) + "\n\n" + recommendations.strip() + "\n"
 
 
-def chunk_documents(title: str, docs: Iterable[str], max_chars: int) -> list[str]:
-    chunks: list[str] = []
-    current = [f"# {title}", ""]
-    current_len = sum(len(part) for part in current)
+def render_benchmark_documents(
+    benchmark: Benchmark,
+    *,
+    max_tokens: int,
+    max_chars: int | None,
+    file_header_tokens: int = 0,
+    file_header_chars: int = 0,
+) -> list[RenderedDocument]:
+    """Render benchmark, splitting only between complete recommendations."""
+    rendered_recommendations = [render_recommendation(rec) for rec in benchmark.recommendations]
+    full_text = render_benchmark(benchmark)
+    if _within_limits(
+        count_tokens(full_text) + file_header_tokens,
+        len(full_text) + file_header_chars,
+        max_tokens=max_tokens,
+        max_chars=max_chars,
+    ):
+        return [
+            RenderedDocument(
+                text=full_text,
+                benchmark_id=benchmark.benchmark_id,
+                title=benchmark.title,
+                version=benchmark.version,
+                recommendation_start=(
+                    benchmark.recommendations[0].ref if benchmark.recommendations else None
+                ),
+                recommendation_end=(
+                    benchmark.recommendations[-1].ref if benchmark.recommendations else None
+                ),
+            )
+        ]
 
-    for doc in docs:
-        if current_len > 0 and current_len + len(doc) + 2 > max_chars and len(current) > 2:
-            chunks.append("\n".join(current).strip() + "\n")
-            current = [f"# {title}", ""]
-            current_len = sum(len(part) for part in current)
+    base_header = _benchmark_header(benchmark)
+    header_tokens = count_tokens(base_header) + file_header_tokens + 20
+    header_chars = len(base_header) + file_header_chars + 40
+    groups: list[list[tuple[Recommendation, str, int]]] = []
+    current: list[tuple[Recommendation, str, int]] = []
+    current_tokens = header_tokens
+    current_chars = header_chars
 
-        current.append(doc)
-        current_len += len(doc) + 1
+    for rec, rendered in zip(benchmark.recommendations, rendered_recommendations, strict=True):
+        rec_tokens = count_tokens(rendered) + 2
+        rec_chars = len(rendered) + 2
+        if not _within_limits(
+            header_tokens + rec_tokens,
+            header_chars + rec_chars,
+            max_tokens=max_tokens,
+            max_chars=max_chars,
+        ):
+            raise ValueError(
+                f"Recommendation {benchmark.benchmark_id}/{rec.ref} exceeds knowledge file limit"
+            )
+        if current and not _within_limits(
+            current_tokens + rec_tokens,
+            current_chars + rec_chars,
+            max_tokens=max_tokens,
+            max_chars=max_chars,
+        ):
+            groups.append(current)
+            current = []
+            current_tokens = header_tokens
+            current_chars = header_chars
+        current.append((rec, rendered, rec_tokens))
+        current_tokens += rec_tokens
+        current_chars += rec_chars
+    if current:
+        groups.append(current)
 
-    if len(current) > 2:
-        chunks.append("\n".join(current).strip() + "\n")
+    documents: list[RenderedDocument] = []
+    total_parts = len(groups)
+    for index, group in enumerate(groups, start=1):
+        text = _benchmark_header(benchmark, (index, total_parts))
+        text += "\n\n" + "\n\n".join(rendered for _, rendered, _ in group).strip() + "\n"
+        final_tokens = count_tokens(text) + file_header_tokens
+        if not _within_limits(
+            final_tokens,
+            len(text) + file_header_chars,
+            max_tokens=max_tokens,
+            max_chars=max_chars,
+        ):
+            raise ValueError(f"Benchmark part {benchmark.benchmark_id}/{index} exceeds file limit")
+        documents.append(
+            RenderedDocument(
+                text=text,
+                benchmark_id=benchmark.benchmark_id,
+                title=benchmark.title,
+                version=benchmark.version,
+                recommendation_start=group[0][0].ref,
+                recommendation_end=group[-1][0].ref,
+            )
+        )
+    return documents
 
+
+def chunk_rendered_documents(
+    title: str,
+    documents: Iterable[RenderedDocument],
+    *,
+    max_tokens: int,
+    max_chars: int | None,
+) -> list[tuple[str, list[RenderedDocument]]]:
+    """Pack rendered documents into token-safe knowledge files."""
+    header = f"# {title}\n\n"
+    header_tokens = count_tokens(header)
+    chunks: list[tuple[str, list[RenderedDocument]]] = []
+    current: list[RenderedDocument] = []
+    current_tokens = header_tokens
+    current_chars = len(header)
+
+    for document in documents:
+        document_tokens = count_tokens(document.text) + 2
+        document_chars = len(document.text) + 2
+        if current and not _within_limits(
+            current_tokens + document_tokens,
+            current_chars + document_chars,
+            max_tokens=max_tokens,
+            max_chars=max_chars,
+        ):
+            text = header + "\n".join(item.text for item in current).strip() + "\n"
+            chunks.append((text, current))
+            current = []
+            current_tokens = header_tokens
+            current_chars = len(header)
+        current.append(document)
+        current_tokens += document_tokens
+        current_chars += document_chars
+
+    if current:
+        text = header + "\n".join(item.text for item in current).strip() + "\n"
+        chunks.append((text, current))
     return chunks
 
 
 def cleanup_output_dir(output_dir: Path) -> None:
+    """Remove only files known to have been generated by this packager."""
     if not output_dir.exists():
         return
 
-    for path in output_dir.iterdir():
-        if not path.is_file():
-            continue
-        if path.suffix.lower() == ".md" or path.name == "manifest.json":
+    generated: set[str] = set()
+    recognized = False
+    manifest_path = output_dir / "manifest.json"
+    if manifest_path.exists():
+        try:
+            prior = json.loads(manifest_path.read_text(encoding="utf-8"))
+            recognized = "packaging_mode" in prior or "bundles" in prior
+            generated.update(
+                bundle["filename"]
+                for bundle in prior.get("bundles", [])
+                if isinstance(bundle, dict) and bundle.get("filename")
+            )
+        except Exception:
+            pass
+
+    for pattern in ("cis-benchmarks-knowledge-*.md", "all-benchmarks-*.md"):
+        matches = [path.name for path in output_dir.glob(pattern)]
+        if matches:
+            recognized = True
+            generated.update(matches)
+    if recognized:
+        generated.update({"README.md", "manifest.json", "CUSTOM_GPT_INSTRUCTIONS.md"})
+    elif any((output_dir / name).exists() for name in ("README.md", "manifest.json")):
+        raise ValueError(f"Refusing to overwrite unrecognized packaging output: {output_dir}")
+    for filename in generated:
+        path = output_dir / filename
+        if path.is_file():
             path.unlink()
 
 
@@ -464,13 +608,17 @@ def build_manifest(
     grouped: dict[str, list[Benchmark]],
     skip_reasons: dict[str, str],
     stats: PackageStats,
+    packaging_mode: str,
+    manifest_context: dict | None = None,
 ) -> None:
     manifest = {
         "processed_files": stats.processed_files,
         "skipped_files": stats.skipped_files,
         "bundle_files": stats.bundle_files,
-        "summary_mode": "light-extractive",
-        "packaging_mode": "single-file" if len(grouped) == 1 and "all-benchmarks" in grouped else "family-bundles",
+        "content_mode": "source-faithful-compact",
+        "packaging_mode": packaging_mode,
+        "token_encoding": TOKEN_ENCODING,
+        "bundles": stats.bundles,
         "families": {
             family: [
                 {
@@ -492,15 +640,24 @@ def build_manifest(
         "skipped_paths": sorted(skip_reasons),
         "skip_reasons": dict(sorted(skip_reasons.items())),
     }
+    if manifest_context:
+        manifest.update(manifest_context)
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
 def package_downloads(
     input_dir: Path,
     output_dir: Path,
-    max_chars: int = 1_200_000,
-    single_file: bool = True,
+    max_chars: int | None = None,
+    single_file: bool | None = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    max_files: int = DEFAULT_MAX_FILES,
+    manifest_context: dict | None = None,
 ) -> PackageStats:
+    if max_tokens < 1:
+        raise ValueError("max_tokens must be at least 1")
+    if max_files < 1:
+        raise ValueError("max_files must be at least 1")
     output_dir.mkdir(parents=True, exist_ok=True)
     cleanup_output_dir(output_dir)
     loaded_benchmarks, skip_reasons = iter_downloaded_benchmarks(input_dir)
@@ -508,7 +665,11 @@ def package_downloads(
     grouped: dict[str, list[Benchmark]] = defaultdict(list)
     sorted_grouped: dict[str, list[Benchmark]] = {}
     for item in loaded_benchmarks:
-        family = "all-benchmarks" if single_file else extract_family_name(item.benchmark.title)
+        family = (
+            "all-benchmarks"
+            if single_file is not False
+            else extract_family_name(item.benchmark.title)
+        )
         grouped[family].append(item.benchmark)
 
     for family, benchmarks in grouped.items():
@@ -529,41 +690,131 @@ def package_downloads(
         "",
         f"Processed benchmark files: {stats.processed_files}",
         f"Skipped files: {stats.skipped_files}",
-        "Summary mode: light-extractive",
+        "Content mode: source-faithful-compact",
         "",
         "These files are intended for Custom GPT knowledge uploads.",
-        "Recommendation content is source-faithful, lightly summarized, and converted into readable Markdown.",
+        "Recommendation content is source-faithful, compact, and converted into readable Markdown.",
         "Invalid files and benchmarks with verified recommendation-count mismatches were excluded.",
         "",
         "Generated bundles:",
-        f"Packaging mode: {'single-file' if single_file else 'family-bundles'}",
+        "Packaging mode: "
+        + (
+            "single-file"
+            if single_file is True
+            else "family-bundles"
+            if single_file is False
+            else "upload-safe"
+        ),
     ]
 
-    render_queue: list[tuple[str, Benchmark]] = [
-        (family, benchmark)
-        for family in sorted(sorted_grouped)
-        for benchmark in sorted_grouped[family]
+    file_header = "# CIS Benchmarks Knowledge\n\n"
+    render_queue = [
+        benchmark for family in sorted(sorted_grouped) for benchmark in sorted_grouped[family]
     ]
-    rendered_by_family: dict[str, list[str]] = defaultdict(list)
-    for family, benchmark in track(render_queue, description="Rendering benchmarks"):
-        rendered_by_family[family].append(render_benchmark(benchmark))
+    documents_by_family: dict[str, list[RenderedDocument]] = defaultdict(list)
+    for benchmark in track(render_queue, description="Rendering benchmarks"):
+        family = (
+            "all-benchmarks"
+            if single_file is not False
+            else extract_family_name(benchmark.title)
+        )
+        documents_by_family[family].extend(
+            render_benchmark_documents(
+                benchmark,
+                max_tokens=max_tokens,
+                max_chars=max_chars,
+                file_header_tokens=count_tokens(file_header),
+                file_header_chars=len(file_header),
+            )
+        )
 
-    prepared_bundles: list[tuple[str, int, list[str]]] = []
-    for family in sorted(sorted_grouped):
-        rendered = rendered_by_family[family]
-        if single_file:
-            chunks = [f"# CIS Benchmarks - {family}\n\n" + "\n".join(rendered).strip() + "\n"]
+    prepared: list[tuple[str, str, list[RenderedDocument]]] = []
+    if single_file is True:
+        documents = documents_by_family.get("all-benchmarks", [])
+        content = file_header + "\n".join(document.text for document in documents).strip() + "\n"
+        if not _within_limits(
+            count_tokens(content),
+            len(content),
+            max_tokens=max_tokens,
+            max_chars=max_chars,
+        ):
+            raise ValueError(
+                "Single-file output exceeds Custom GPT file limit. Use upload-safe default mode."
+            )
+        prepared.append(("all-benchmarks", content, documents))
+        packaging_mode = "single-file"
+    elif single_file is False:
+        packaging_mode = "family-bundles"
+        for family in sorted(documents_by_family):
+            for content, documents in chunk_rendered_documents(
+                f"CIS Benchmarks - {family}",
+                documents_by_family[family],
+                max_tokens=max_tokens,
+                max_chars=max_chars,
+            ):
+                prepared.append((family, content, documents))
+    else:
+        packaging_mode = "upload-safe"
+        all_documents = documents_by_family.get("all-benchmarks", [])
+        for content, documents in chunk_rendered_documents(
+            "CIS Benchmarks Knowledge",
+            all_documents,
+            max_tokens=max_tokens,
+            max_chars=max_chars,
+        ):
+            prepared.append(("all-benchmarks", content, documents))
+
+    if len(prepared) > max_files:
+        raise ValueError(
+            f"Knowledge output requires {len(prepared)} files, exceeding max_files={max_files}."
+        )
+
+    family_indexes: dict[str, int] = defaultdict(int)
+    total_files = len(prepared)
+    for family, content, documents in track(prepared, description="Writing bundles"):
+        family_indexes[family] += 1
+        if packaging_mode == "upload-safe":
+            filename = (
+                f"cis-benchmarks-knowledge-{family_indexes[family]:02d}"
+                f"-of-{total_files:02d}.md"
+            )
+        elif packaging_mode == "single-file":
+            filename = "all-benchmarks-01.md"
         else:
-            chunks = chunk_documents(f"CIS Benchmarks - {family}", rendered, max_chars=max_chars)
-        prepared_bundles.append((family, len(sorted_grouped[family]), chunks))
-
-    for family, benchmark_count, chunks in track(prepared_bundles, description="Writing bundles"):
-        index_lines.append(f"- {family}: {benchmark_count} benchmarks")
-        for idx, chunk in enumerate(chunks, start=1):
-            filename = f"{slugify(family)}-{idx:02d}.md"
-            (output_dir / filename).write_text(chunk, encoding="utf-8")
-            stats.bundle_files += 1
-            index_lines.append(f"  File: {filename}")
+            filename = f"{slugify(family)}-{family_indexes[family]:02d}.md"
+        encoded = content.encode("utf-8")
+        token_count = count_tokens(content)
+        if not _within_limits(
+            token_count,
+            len(content),
+            max_tokens=max_tokens,
+            max_chars=max_chars,
+        ):
+            raise RuntimeError(f"Internal chunking error: {filename} exceeds configured limit")
+        (output_dir / filename).write_bytes(encoded)
+        stats.bundle_files += 1
+        benchmark_entries = [
+            {
+                "benchmark_id": document.benchmark_id,
+                "title": document.title,
+                "version": document.version,
+                "recommendation_start": document.recommendation_start,
+                "recommendation_end": document.recommendation_end,
+            }
+            for document in documents
+        ]
+        stats.bundles.append(
+            {
+                "filename": filename,
+                "tokens": token_count,
+                "bytes": len(encoded),
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+                "benchmarks": benchmark_entries,
+            }
+        )
+        index_lines.append(
+            f"- {filename}: {len(documents)} benchmark document(s), {token_count} tokens"
+        )
 
     if skip_reasons:
         index_lines.extend(["", "Skipped files:"])
@@ -571,7 +822,29 @@ def package_downloads(
             index_lines.append(f"- {filename}: {reason}")
 
     (output_dir / "README.md").write_text("\n".join(index_lines) + "\n", encoding="utf-8")
-    build_manifest(output_dir, grouped, skip_reasons, stats)
+    instructions = """# Custom GPT Instructions
+
+You are a CIS Benchmark advisory assistant. Base benchmark-specific answers only on the uploaded CIS Benchmark knowledge files and the user's question.
+
+For every substantive answer, identify each source in this format:
+
+- Document: <exact benchmark title and version>
+- Recommendation: <reference> <title>
+- Evidence section: <Description|Rationale|Audit|Remediation|Default Value|References>
+
+Keep recommendations from different products or versions separate. Never merge them into an invented recommendation. Prefer original Audit and Remediation steps for technical guidance. Preserve commands and configuration values exactly enough to execute safely. Clearly label any operational interpretation as interpretation, not source text.
+
+Use compact Profiles and CIS, NIST, and MITRE mappings only as applicability metadata. Do not treat mappings as remediation evidence. If uploaded files lack enough evidence, say so instead of guessing. State version differences and ambiguity explicitly.
+"""
+    (output_dir / "CUSTOM_GPT_INSTRUCTIONS.md").write_text(instructions, encoding="utf-8")
+    build_manifest(
+        output_dir,
+        sorted_grouped,
+        skip_reasons,
+        stats,
+        packaging_mode,
+        manifest_context=manifest_context,
+    )
     return stats
 
 
@@ -594,15 +867,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-chars",
         type=int,
-        default=1_200_000,
-        help="Maximum characters per output Markdown file",
+        default=None,
+        help="Optional secondary character limit per output Markdown file",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=DEFAULT_MAX_TOKENS,
+        help="Maximum tokens per output Markdown file",
+    )
+    parser.add_argument(
+        "--max-files",
+        type=int,
+        default=DEFAULT_MAX_FILES,
+        help="Maximum number of Markdown knowledge files",
     )
     parser.add_argument(
         "--single-file",
         dest="single_file",
         action="store_true",
-        default=True,
-        help="Package all benchmarks into one logical bundle (default)",
+        default=None,
+        help="Require one file; fails when content exceeds file limits",
     )
     parser.add_argument(
         "--family-bundles",
@@ -625,6 +910,8 @@ def main() -> int:
         args.output_dir,
         max_chars=args.max_chars,
         single_file=args.single_file,
+        max_tokens=args.max_tokens,
+        max_files=args.max_files,
     )
 
     print(f"Processed {stats.processed_files} benchmark files")

@@ -537,14 +537,16 @@ class CatalogDatabase:
             benchmark.benchmark_id,
         )
 
-    def mark_latest_versions(self):
-        """Mark only the newest version in each benchmark family as latest."""
+    def mark_latest_versions(self, benchmark_ids: set[str] | None = None):
+        """Mark newest version in each family, optionally limited to current snapshot IDs."""
         with Session(self.engine) as session:
             benchmarks = session.exec(select(CatalogBenchmark)).all()
 
             grouped: dict[tuple[str, int], list[CatalogBenchmark]] = {}
             for benchmark in benchmarks:
                 benchmark.is_latest = False
+                if benchmark_ids is not None and benchmark.benchmark_id not in benchmark_ids:
+                    continue
                 key = (self._normalize_title_for_latest(benchmark.title), benchmark.status_id)
                 grouped.setdefault(key, []).append(benchmark)
 

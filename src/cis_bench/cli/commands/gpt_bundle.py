@@ -8,6 +8,7 @@ import click
 from rich.console import Console
 
 from cis_bench.gpt_bundle import BundleOptions, default_deliverable_dir, run_gpt_bundle
+from cis_bench.gpt_knowledge import DEFAULT_MAX_FILES, DEFAULT_MAX_TOKENS
 
 console = Console()
 
@@ -42,18 +43,31 @@ console = Console()
 @click.option(
     "--max-retries",
     type=click.IntRange(0, 10),
-    default=2,
+    default=5,
     show_default=True,
     help="Retry passes for missing or incomplete benchmark downloads.",
 )
 @click.option("--overwrite", is_flag=True, help="Replace an existing output folder.")
-@click.option("--keep-temp", is_flag=True, help="Copy temporary staging files into the output folder.")
+@click.option("--keep-temp", is_flag=True, help="Keep staging files after a successful run.")
+@click.option(
+    "--catalog-refresh",
+    type=click.Choice(["auto", "always", "never"]),
+    default="auto",
+    show_default=True,
+    help="Catalog freshness policy before resolving latest benchmarks.",
+)
 @click.option(
     "--max-chars",
     type=int,
-    default=1_200_000,
-    show_default=True,
-    help="Maximum characters per Markdown bundle when chunking is enabled.",
+    default=None,
+    help="Optional secondary character limit per knowledge file.",
+)
+@click.option("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS, show_default=True)
+@click.option("--max-files", type=int, default=DEFAULT_MAX_FILES, show_default=True)
+@click.option(
+    "--single-file",
+    is_flag=True,
+    help="Require one knowledge file; fails when content exceeds upload limits.",
 )
 def gpt_bundle(
     output_dir,
@@ -63,7 +77,11 @@ def gpt_bundle(
     max_retries,
     overwrite,
     keep_temp,
+    catalog_refresh,
     max_chars,
+    max_tokens,
+    max_files,
+    single_file,
 ):
     """Download latest CIS Benchmarks and package them for Custom GPT knowledge."""
     options = BundleOptions(
@@ -74,8 +92,11 @@ def gpt_bundle(
         max_retries=max_retries,
         overwrite=overwrite,
         keep_temp=keep_temp,
+        catalog_refresh=catalog_refresh,
         max_chars=max_chars,
-        single_file=True,
+        max_tokens=max_tokens,
+        max_files=max_files,
+        single_file=True if single_file else None,
     )
 
     try:
